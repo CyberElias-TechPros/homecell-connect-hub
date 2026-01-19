@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { MobileLayout, PageHeader } from '@/components/layout/MobileLayout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useMembers } from '@/contexts/MemberContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { Member } from '@/types';
 import { 
   ArrowLeft, 
   Save, 
@@ -20,12 +21,14 @@ import {
   MapPin
 } from 'lucide-react';
 
-export function AddMemberScreen() {
+export function EditMemberScreen() {
   const navigate = useNavigate();
+  const { id } = useParams();
   const { user } = useAuth();
-  const { addMember, isLoading } = useMembers();
+  const { getMember, updateMember, canEditMember, isLoading } = useMembers();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [member, setMember] = useState<Member | null>(null);
   
   const [formData, setFormData] = useState({
     fullName: '',
@@ -44,14 +47,44 @@ export function AddMemberScreen() {
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (user?.homecellId) {
-      setFormData(prev => ({
-        ...prev,
-        serviceUnit: user.homecellId,
-        serviceUnitName: user.homecellName || '',
-      }));
+    if (id) {
+      const m = getMember(id);
+      if (m) {
+        setMember(m);
+        setFormData({
+          fullName: m.fullName,
+          phone: m.phone.startsWith('+234') ? m.phone.slice(4) : m.phone,
+          gender: m.gender,
+          maritalStatus: m.maritalStatus,
+          birthday: m.birthday.split('T')[0], // YYYY-MM-DD
+          serviceUnit: m.serviceUnit,
+          serviceUnitName: m.serviceUnitName,
+          membershipType: m.membershipType,
+          tag: m.tag,
+          email: m.email || '',
+          address: m.address || '',
+        });
+      } else {
+        navigate('/members');
+      }
     }
-  }, [user]);
+  }, [id, getMember, navigate]);
+
+  if (!canEditMember) {
+    return (
+      <MobileLayout>
+        <div className="text-center py-12">No permission to edit members</div>
+      </MobileLayout>
+    );
+  }
+
+  if (!member) {
+    return (
+      <MobileLayout>
+        <div className="text-center py-12">Loading...</div>
+      </MobileLayout>
+    );
+  }
 
   const handleSubmit = async () => {
     const newErrors: Record<string, string> = {};
@@ -71,21 +104,17 @@ export function AddMemberScreen() {
     setIsSubmitting(true);
 
     try {
-      await addMember({
+      await updateMember(id!, {
         fullName: formData.fullName,
         phone: '+234' + formData.phone.replace(/\s/g, ''),
         gender: formData.gender as 'male' | 'female',
         maritalStatus: formData.maritalStatus as 'single' | 'married' | 'divorced' | 'widowed',
         birthday: formData.birthday,
-        serviceUnit: formData.serviceUnit,
-        serviceUnitName: formData.serviceUnitName,
         membershipType: formData.membershipType as 'regular' | 'visitor' | 'first_timer' | 'inactive',
         tag: formData.tag as 'adult' | 'child',
         email: formData.email || undefined,
         address: formData.address || undefined,
-        joinedAt: new Date().toISOString(),
-        isActive: true,
-        createdBy: user?.id || '',
+        updatedBy: user?.id,
       });
       setShowSuccess(true);
       setTimeout(() => navigate('/members'), 1500);
@@ -113,7 +142,7 @@ export function AddMemberScreen() {
           transition={{ delay: 0.2 }}
           className="text-xl font-serif font-bold text-foreground mb-2"
         >
-          Member Added!
+          Member Updated!
         </motion.h2>
         <motion.p
           initial={{ opacity: 0 }}
@@ -121,7 +150,7 @@ export function AddMemberScreen() {
           transition={{ delay: 0.3 }}
           className="text-muted-foreground text-center"
         >
-          {formData.fullName} has been added to your homecell.
+          {formData.fullName}'s information has been updated.
         </motion.p>
       </div>
     );
@@ -130,7 +159,7 @@ export function AddMemberScreen() {
   return (
     <MobileLayout hasBottomNav={false}>
       <PageHeader
-        title="Add Member"
+        title="Edit Member"
         onBack={() => navigate(-1)}
         action={
           <Button

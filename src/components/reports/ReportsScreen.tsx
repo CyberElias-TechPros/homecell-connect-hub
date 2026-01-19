@@ -3,27 +3,39 @@ import { useNavigate } from 'react-router-dom';
 import { MobileLayout, PageHeader, Section } from '@/components/layout/MobileLayout';
 import { BottomNavigation } from '@/components/layout/BottomNavigation';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { useApp } from '@/contexts/AppContext';
-import { 
-  Plus, 
-  FileText, 
-  CheckCircle2, 
-  Clock, 
+import { useReports } from '@/contexts/ReportsContext';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  Plus,
+  FileText,
+  CheckCircle2,
+  Clock,
   AlertCircle,
   ChevronRight,
-  Calendar
+  Calendar,
+  Eye,
+  Lock,
+  User,
+  History
 } from 'lucide-react';
-
-const mockReports = [
-  { id: 'r1', week: 'Week 3', date: 'Jan 21, 2024', status: 'draft', attendance: 7 },
-  { id: 'r2', week: 'Week 2', date: 'Jan 14, 2024', status: 'submitted', attendance: 6 },
-  { id: 'r3', week: 'Week 1', date: 'Jan 7, 2024', status: 'approved', attendance: 8 },
-  { id: 'r4', week: 'Week 52', date: 'Dec 31, 2023', status: 'approved', attendance: 5 },
-];
 
 export function ReportsScreen() {
   const navigate = useNavigate();
   const { currentWeek } = useApp();
+  const { user } = useAuth();
+  const {
+    reportsHistory,
+    getReportStats,
+    canSubmitCurrentReport,
+    canViewReports,
+    getTimeUntilDeadline
+  } = useReports();
+
+  const reportStats = getReportStats();
+  const deadlineInfo = getTimeUntilDeadline();
+  const canSubmit = canSubmitCurrentReport();
 
   const getStatusConfig = (status: string) => {
     switch (status) {
@@ -36,19 +48,29 @@ export function ReportsScreen() {
     }
   };
 
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric'
+    });
+  };
+
   return (
     <MobileLayout>
-      <PageHeader 
-        title="Reports" 
+      <PageHeader
+        title="Reports"
         subtitle="Weekly submissions"
         action={
-          <Button
-            onClick={() => navigate('/reports/new')}
-            className="gradient-primary shadow-primary press-effect"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            New Report
-          </Button>
+          canSubmit && (
+            <Button
+              onClick={() => navigate('/reports/new')}
+              className="gradient-primary shadow-primary press-effect"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              New Report
+            </Button>
+          )
         }
       />
 
@@ -57,18 +79,45 @@ export function ReportsScreen() {
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          onClick={() => navigate('/reports/new')}
-          className="bg-secondary/20 border-2 border-dashed border-secondary rounded-2xl p-5 cursor-pointer press-effect"
+          onClick={() => canSubmit && navigate('/reports/new')}
+          className={`border-2 border-dashed rounded-2xl p-5 ${
+            canSubmit
+              ? 'bg-secondary/20 border-secondary cursor-pointer press-effect'
+              : 'bg-muted/20 border-muted cursor-not-allowed'
+          }`}
         >
           <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-secondary rounded-xl flex items-center justify-center">
-              <FileText className="w-6 h-6 text-secondary-foreground" />
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+              canSubmit ? 'bg-secondary' : 'bg-muted'
+            }`}>
+              {canSubmit ? (
+                <FileText className="w-6 h-6 text-secondary-foreground" />
+              ) : (
+                <Lock className="w-6 h-6 text-muted-foreground" />
+              )}
             </div>
             <div className="flex-1">
-              <h3 className="font-semibold text-foreground">{currentWeek}</h3>
-              <p className="text-sm text-muted-foreground">Tap to submit your report</p>
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="font-semibold text-foreground">{currentWeek}</h3>
+                {deadlineInfo.isOverdue && (
+                  <Badge variant="destructive" className="text-xs">Overdue</Badge>
+                )}
+                {!deadlineInfo.isOverdue && deadlineInfo.hours < 24 && (
+                  <Badge variant="secondary" className="text-xs">
+                    {deadlineInfo.hours}h {deadlineInfo.minutes}m left
+                  </Badge>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {canSubmit
+                  ? 'Tap to submit your report'
+                  : user?.role === 'leader'
+                    ? 'Report already submitted'
+                    : 'Read-only access'
+                }
+              </p>
             </div>
-            <ChevronRight className="w-5 h-5 text-muted-foreground" />
+            {canSubmit && <ChevronRight className="w-5 h-5 text-muted-foreground" />}
           </div>
         </motion.div>
       </Section>
@@ -77,9 +126,9 @@ export function ReportsScreen() {
       <Section className="mb-6">
         <div className="grid grid-cols-3 gap-3">
           {[
-            { label: 'Submitted', value: 2, color: 'bg-blue-500' },
-            { label: 'Approved', value: 2, color: 'bg-success' },
-            { label: 'Pending', value: 1, color: 'bg-warning' },
+            { label: 'Submitted', value: reportStats.submitted, color: 'bg-blue-500' },
+            { label: 'Approved', value: reportStats.approved, color: 'bg-success' },
+            { label: 'Pending', value: reportStats.pending, color: 'bg-warning' },
           ].map((stat, index) => (
             <motion.div
               key={stat.label}
@@ -101,37 +150,65 @@ export function ReportsScreen() {
       {/* Reports List */}
       <Section title="Report History" className="mb-6">
         <div className="space-y-2">
-          {mockReports.map((report, index) => {
-            const status = getStatusConfig(report.status);
-            const StatusIcon = status.icon;
+          {reportsHistory.length === 0 ? (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-center py-8"
+            >
+              <History className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+              <p className="text-muted-foreground">No reports submitted yet</p>
+            </motion.div>
+          ) : (
+            reportsHistory.map((report, index) => {
+              const status = getStatusConfig(report.status);
+              const StatusIcon = status.icon;
 
-            return (
-              <motion.div
-                key={report.id}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.2 + index * 0.1 }}
-                onClick={() => navigate(`/reports/${report.id}`)}
-                className="flex items-center gap-4 p-4 bg-card rounded-xl border border-border press-effect cursor-pointer"
-              >
-                <div className="w-12 h-12 bg-muted rounded-xl flex items-center justify-center">
-                  <Calendar className="w-5 h-5 text-muted-foreground" />
-                </div>
-                <div className="flex-1">
-                  <p className="font-medium text-foreground">{report.week}</p>
-                  <p className="text-sm text-muted-foreground">{report.date}</p>
-                </div>
-                <div className="text-right">
-                  <div className={`inline-flex items-center gap-1 px-2 py-1 rounded-full ${status.bgColor}`}>
-                    <StatusIcon className={`w-3 h-3 ${status.color}`} />
-                    <span className={`text-xs font-medium ${status.color}`}>{status.label}</span>
+              return (
+                <motion.div
+                  key={report.id}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.2 + index * 0.1 }}
+                  onClick={() => navigate(`/reports/${report.id}`)}
+                  className="flex items-center gap-4 p-4 bg-card rounded-xl border border-border press-effect cursor-pointer"
+                >
+                  <div className="w-12 h-12 bg-muted rounded-xl flex items-center justify-center">
+                    <Calendar className="w-5 h-5 text-muted-foreground" />
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">{report.attendance} attended</p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-muted-foreground" />
-              </motion.div>
-            );
-          })}
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="font-medium text-foreground">Week {report.weekEnding.split('-')[1]}</p>
+                      {report.submittedAt && (
+                        <Badge variant="outline" className="text-xs">
+                          Submitted {formatDate(report.submittedAt)}
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {report.totalAttendance} attended • {report.newConverts} converts • {report.soulsWon} souls won
+                    </p>
+                    {report.approvedAt && report.approvedBy && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Approved by {report.approvedBy} on {formatDate(report.approvedAt)}
+                      </p>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <div className={`inline-flex items-center gap-1 px-2 py-1 rounded-full ${status.bgColor}`}>
+                      <StatusIcon className={`w-3 h-3 ${status.color}`} />
+                      <span className={`text-xs font-medium ${status.color}`}>{status.label}</span>
+                    </div>
+                    <div className="flex items-center gap-1 mt-1">
+                      <Eye className="w-3 h-3 text-muted-foreground" />
+                      <span className="text-xs text-muted-foreground">View</span>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                </motion.div>
+              );
+            })
+          )}
         </div>
       </Section>
 
