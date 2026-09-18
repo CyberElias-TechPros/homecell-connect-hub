@@ -1,73 +1,150 @@
-# Welcome to your Lovable project
+# Homecell Connect Hub
 
-## Project info
+An online cell platform for a Christ Embassy / LoveWorld cell: a public page
+that lets people find and join the cell, and a leader-facing application for
+running it — members, attendance, follow-up, reports and communication.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+> **Read [`docs/STATUS.md`](docs/STATUS.md) first.** It states plainly which
+> features are backed by the real database and which are still prototype UI
+> showing mock data. Do not treat the screens as uniformly finished.
 
-## How can I edit this code?
+---
 
-There are several ways of editing your application.
+## Architecture
 
-**Use Lovable**
+```
+Browser ── HTTPS ──► Vite / Vercel (React + TypeScript PWA)
+                          │
+                          │  /api/*  (same origin — Vite proxies in dev)
+                          ▼
+                 Cloudflare Worker (Hono)   worker/src/
+                          │
+        ┌─────────────────┼──────────────────┐
+        ▼                 ▼                  ▼
+    D1 (SQLite)        KV (CACHE)        R2 (STORAGE)
+   worker/migrations   rate limits       uploads
+```
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+- **Frontend** — React 18, TypeScript, Vite, Tailwind, Framer Motion, shadcn/ui.
+- **API** — Cloudflare Worker with Hono, Zod validation on every input.
+- **Database** — Cloudflare D1, migrated with `wrangler d1 migrations`.
+- **Shared authorization** — `shared/permissions.ts` is imported by *both* the
+  Worker and the frontend so the two can never disagree about who may do what.
+  The Worker is the only authority; the frontend copy just hides what a user
+  cannot use.
 
-Changes made via Lovable will be committed automatically to this repo.
+## Repository layout
 
-**Use your preferred IDE**
+```
+src/                     React application
+  lib/api.ts             typed API client (single point of contact with the API)
+  lib/adapters.ts        API row → view model translation
+  lib/datetime.ts        time zone + meeting-time logic (unit tested)
+  contexts/              application state
+  pages/                 routes
+shared/permissions.ts    authorization model shared by frontend and Worker
+worker/                  Cloudflare Worker
+  src/index.ts           app entry, middleware, route mounting
+  src/auth.ts            sessions, permissions, OTP storage
+  src/lib/               crypto, validation, scoping, rate limiting, audit
+  src/routes/            auth, public, members, attendance, reports,
+                         announcements, materials, followups, prayer,
+                         notifications, hierarchy
+  migrations/            D1 schema
+docs/STATUS.md           what is real vs. prototype
+docs/DEPLOYMENT.md       Cloudflare + Vercel deployment
+```
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+## Running locally
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+Requires Node 20+.
 
-Follow these steps:
+```bash
+npm install
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+# 1. Apply the database schema
+cd worker
+npx wrangler d1 migrations apply homecell-db --local
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+# 2. Start the API (leave running) — http://127.0.0.1:8787
+npx wrangler dev --port 8787 --ip 0.0.0.0 --local
 
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+# 3. In a second terminal, start the frontend — http://localhost:8080
+cd ..
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+The frontend proxies `/api` and `/health` to the Worker, so the browser only
+ever talks to one origin. That keeps cookies and CORS simple and means the same
+code works when the two are deployed separately.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+### First run: create a cell
 
-**Use GitHub Codespaces**
+The app needs at least one cell before anyone can join. After starting the
+Worker:
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+```bash
+cd worker
+npx wrangler d1 execute homecell-db --local --command "
+INSERT INTO organizations (id,name,slug,timezone,created_at,updated_at)
+  VALUES ('org1','My Ministry','my-ministry','Africa/Lagos',datetime('now'),datetime('now'));
+INSERT INTO districts (id,organization_id,name,code,created_at,updated_at)
+  VALUES ('d1','org1','District 1','D1',datetime('now'),datetime('now'));
+INSERT INTO areas (id,district_id,name,code,created_at,updated_at)
+  VALUES ('a1','d1','Area 1','A1',datetime('now'),datetime('now'));
+INSERT INTO zones (id,area_id,name,code,created_at,updated_at)
+  VALUES ('z1','a1','Zone 1','Z1',datetime('now'),datetime('now'));
+INSERT INTO homecells (id,zone_id,name,code,timezone,meeting_day,meeting_time,auto_approve_members,created_at,updated_at)
+  VALUES ('hc1','z1','Grace Life Online Cell','HC1','Africa/Lagos','sunday','18:00',1,datetime('now'),datetime('now'));
+INSERT INTO app_settings (key,value,updated_at)
+  VALUES ('default_homecell_id','hc1',datetime('now'));
+"
+```
 
-## What technologies are used for this project?
+Then visit `http://localhost:8080` — the landing page loads cell `HC1` and a
+visitor can register.
 
-This project is built with:
+To make yourself the leader of that cell, register normally and then promote
+yourself directly in the database (role changes require `manage_users`
+permission, so this is a deliberate bootstrap step rather than an API call):
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+```bash
+npx wrangler d1 execute homecell-db --local --command \
+  "UPDATE users SET role='leader', status='active' WHERE phone='+234XXXXXXXXXX';"
+```
 
-## How can I deploy this project?
+## Tests
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+```bash
+npm run test          # vitest
+npx tsc --noEmit -p tsconfig.app.json
+npm run build
+```
 
-## Can I connect a custom domain to my Lovable project?
+The time zone logic in `src/lib/datetime.ts` is covered by 15 unit tests,
+including DST transitions, week roll-forward, and behaviour on invalid input
+(the function returns `null` rather than guessing a meeting time).
 
-Yes, you can!
+## Security notes
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+- Passwords: PBKDF2-HMAC-SHA256, 100,000 iterations. **On the Workers free plan,
+  lower `PBKDF2_ITERATIONS` in `worker/src/lib/crypto.ts` to 25,000** — the free
+  plan's 10 ms CPU budget cannot cover 100k iterations. Stored hashes keep
+  verifying because the iteration count is recorded per row.
+- Sessions: only the SHA-256 digest of a session token is stored.
+- Privacy: prayer requests are filtered by `visibility` in SQL. A private
+  request is never returned to a non-author, whatever the client asks for.
+- Pastoral notes (`users.notes`) are only selected for leader-level roles.
+- Every protected route calls `requirePermission`; row access additionally goes
+  through `assertHomecellAccess`.
+- Rate limiting covers registration, login, OTP and password change.
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## Deployment
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+## Licensing and content
+
+This is not an official LoveWorld / Christ Embassy product and uses no
+ministry branding. Ministry content must not be re-hosted without
+authorisation — the materials module stores links, not copied content.
