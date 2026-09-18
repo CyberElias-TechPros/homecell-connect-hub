@@ -1,6 +1,6 @@
 # Implementation status
 
-**Last updated:** 2026-09-18
+**Last updated:** 2026-09-19
 
 This document exists to keep the project honest. It separates what has been
 **built and verified** from what is **still a prototype**, so nobody mistakes a
@@ -19,7 +19,7 @@ and a real D1 database. The commands used are listed in
 | Area | Detail |
 |---|---|
 | Runtime | Cloudflare Worker (Hono) with `workerd` via `wrangler dev` — confirmed running |
-| Database | D1 (SQLite). Schema applied: **20 tables, 56 DDL statements** |
+| Database | D1 (SQLite). Schema applied: **22 tables** across 4 migrations (`0001_init`, `0002_testimonies`, `0003_public_join`, `0004_testimony_consent`) |
 | Real SQL | DDL, bound INSERTs, SELECTs all verified returning real persisted rows |
 | Constraint integrity | Duplicate attendance → `UNIQUE constraint failed`; invalid role → `CHECK constraint failed`; orphan reference → `FOREIGN KEY constraint failed` |
 | Password storage | PBKDF2-HMAC-SHA256, 100,000 iterations, 16-byte random salt, per-row iteration count. Verified the stored value is a hash, never the password |
@@ -78,36 +78,50 @@ and a real D1 database. The commands used are listed in
 
 ---
 
-## ⚠️ Prototype — still renders mock data
+## ✅ Every screen is now on live data
 
-These screens are **built UI backed by `src/data/mockData.ts` and
-`localStorage`**, not by the API. They look finished but are not real. They are
-the priority for the next phase.
+`src/data/mockData.ts` has been **deleted**. Nothing in `src/` imports mock
+data any more — verify with `grep -rn "from '@/data/mockData'" src/`, which
+returns nothing.
 
-| Screen / context | Still mock | What it needs |
-|---|---|---|
-| `AttendanceContext` | ✅ mock | Wire to `GET/POST /api/attendance` |
-| `FollowUpsContext` | ✅ mock | Wire to `/api/followups` |
-| `ReportsContext` | ✅ mock | Wire to `/api/reports` |
-| `AnnouncementsContext` | ✅ mock | Wire to `/api/announcements` |
-| `MaterialsContext` | ✅ mock | Wire to `/api/materials` |
-| Dashboards (Leader/Zonal/Area/District/Admin/Provider) | ✅ mock | Derive from the above |
+| Area | Status |
+|---|---|
+| `AttendanceContext` | ✅ Real API. Draft-based marking; a failed save keeps the leader's sheet rather than discarding it |
+| `FollowUpsContext` | ✅ Real API. `deleteFollowUp` = `status: 'cancelled'` (no hard delete, so pastoral history survives) |
+| `ReportsContext` | ✅ Real API. Draft pre-fills from real attendance plus open prayer/follow-up counts |
+| `AnnouncementsContext` | ✅ Real API, server-side read state |
+| `MaterialsContext` | ✅ Real API. Stores **links**, never copies ministry content |
+| `PrayerContext` | ✅ Real API. Visibility enforced in SQL |
+| `TestimoniesContext` | ✅ Real API. Moderation enforced server-side and by database constraint |
+| Leader dashboard | ✅ Real attendance, follow-ups, announcements, prayer and member counts |
+| Provider dashboard | ✅ Renders the real cell view (a provider is a cell worker, `ROLE_SCOPE.provider === 'homecell'`) |
+| Zonal / Area / District / Admin | ✅ One real oversight dashboard on `GET /api/hierarchy/overview`, scoped per role. Says so plainly when the scope is empty |
 
-**Why this is not simply "swap the data source":** the existing view models are
-richer than the current API. For example the UI `Announcement` expects
-`urgency`, `target`, `channels`, `status` and `deliveryStats`; `Material`
-expects `type`/`format`/`targetAudience`; `FollowUp` expects
-`assignedByName`, `followUpHistory` and a different status vocabulary. Wiring
-them faithfully means either extending the API schema or simplifying the
-components — a deliberate decision, not a mechanical one. Only the `Member`
-adapter is currently exact.
+**What replaced the fabricated dashboards.** The four oversight dashboards
+previously showed invented figures (`totalHomecells: 45`, `totalAttendance: 285`,
+per-cell attendance percentages) and three of them had buttons that only called
+`console.log`. They now render one `OversightDashboard` fed by a real aggregate
+endpoint that counts rows in the database, scoped to the cells the signed-in
+user can actually reach.
+
+### The one deliberate exception
+
+`AnnouncementsContext.updateAnnouncement` / `scheduleAnnouncement` and
+`MaterialsContext.updateMaterial` / `deleteMaterial` / `scheduleMaterial`
+**throw explicit "not supported yet" errors**. The API has no such operations,
+and the alternative — an optimistic no-op that reports success — is exactly the
+pretend-behaviour this project forbids.
 
 ---
 
 ## ❌ Not started
 
-- Prayer request and testimony screens (API exists at `/api/prayer`; no UI yet)
-- Testimony submission and moderation workflow
+- Video meetings: **not built, by design.** Cells link out to Zoom / Google Meet
+  / Jitsi. No custom WebRTC
+- Payments: **not built, by design.** The platform links only to official church
+  giving channels
+- Push / SMS / WhatsApp *delivery* of notifications. `MESSAGING_DRIVER=log`
+- Message threads between members (not built)
 - Offline write queue — `saveOffline`/`getPendingChanges` are honest no-ops
 - Push / SMS / WhatsApp delivery. `MESSAGING_DRIVER=log`; OTP codes are written
   to the Worker log. The UI **says so** rather than claiming a message was sent
@@ -121,38 +135,139 @@ adapter is currently exact.
 
 ## Verification performed
 
+Everything below was actually run. Commands and their real output.
+
+### Automated
+
 ```bash
-# Worker boots with all bindings
-cd worker && npx wrangler dev --port 8787 --ip 0.0.0.0 --local
-
-# Apply schema to local D1
-npx wrangler d1 migrations apply homecell-db --local
-# -> 56 commands executed successfully
-
-# Constraint integrity (all three must fail)
-npx wrangler d1 execute homecell-db --local --command "<duplicate attendance INSERT>"
-npx wrangler d1 execute homecell-db --local --command "<invalid role INSERT>"
-npx wrangler d1 execute homecell-db --local --command "<orphan FK INSERT>"
-
-# Frontend
-npx tsc --noEmit -p tsconfig.app.json   # 0 errors
-npx vitest run                          # 16 passed
-npm run build                           # 6 chunks, no size warning
-
-# Journey through the browser-facing origin (Vite proxy on :8080)
-curl -X POST localhost:8080/api/auth/register ...
-curl -b jar -X GET localhost:8080/api/auth/me
-curl -b jar -X POST localhost:8080/api/auth/logout
+node worker/scripts/seed.mjs --reset      # clean, known database
+npx tsc --noEmit -p tsconfig.app.json     # 0 errors
+cd worker && npx tsc --noEmit             # 0 errors
+npx vitest run                            # 3 files, 30 tests, all passing
+npm run build                             # 6 chunks, entry 487 kB (gzip 129 kB)
 ```
+
+The 30 tests comprise 15 timezone unit tests, 1 smoke test, and **14 end-to-end
+journeys** (`src/test/journeys.e2e.test.tsx`). The end-to-end suite is not
+mocked: it renders the real page components inside the same provider stack
+`App.tsx` mounts, every context calls the live API, and a mutation made through
+the UI is re-read from the database to prove it persisted. If the backend is not
+running the suite **skips loudly** rather than passing against nothing.
+
+### End-to-end journeys verified (through the real UI, to real D1 rows)
+
+| # | Journey | Result |
+|---|---|---|
+| 1 | Public cell page renders the real cell name, leader and member count | ✅ |
+| 2 | Meeting link appears only once the leader opens public joining | ✅ |
+| 3 | Meeting link and passcode are withheld from an anonymous visitor when closed | ✅ |
+| 4 | Leader sees a member's prayer request, with the author named | ✅ |
+| 5 | A `private` prayer request is not returned to another member — DOM and API | ✅ |
+| 6 | A member composes a prayer request in the UI and it reaches the database | ✅ |
+| 7 | A testimony stays hidden from other members until a leader approves it | ✅ |
+| 8 | A public testimony submitted without consent is refused, and nothing is written | ✅ |
+| 9 | A public testimony with consent is still gated until approval | ✅ |
+| 10 | A member cannot change cell meeting settings | ✅ 403 |
+| 11 | A member cannot issue an invitation | ✅ 403 |
+| 12 | A member cannot approve their own testimony | ✅ 403, still `pending` in the DB |
+| 13 | A member cannot read another cell through the overview endpoint | ✅ scoped to `hc1` |
+| 14 | An unauthenticated caller gets 401 on members, prayer, attendance, reports, follow-ups | ✅ |
+
+### Database-level guards proven directly
+
+Run against D1, bypassing the application entirely:
+
+```bash
+# 1. A testimony cannot be published before it is approved
+npx wrangler d1 execute homecell-db --local --command \
+  "UPDATE testimonies SET shared_publicly=1 WHERE status='pending' AND consent_public=1;"
+# -> CHECK constraint failed: shared_publicly = 0 OR status = 'approved'
+
+# 2. A testimony cannot be marked publicly shared without the author's consent
+npx wrangler d1 execute homecell-db --local --command \
+  "UPDATE testimonies SET status='approved', shared_publicly=1 WHERE consent_public=0 LIMIT 1;"
+# -> shared_publicly requires the author's consent
+
+# 3. The same guard on INSERT, so a future code path cannot bypass it
+# -> shared_publicly requires the author's consent
+```
+
+### Invitations and data rights
+
+| Check | Result |
+|---|---|
+| Leader creates an invitation | ✅ 201, token returned once |
+| Raw token is **not** stored — only its SHA-256 digest | ✅ DB shows a different value |
+| Invitation resolves on the public route | ✅ cell name + inviter |
+| Invitation is single-use | ✅ second use → 410 `INVITE_USED` |
+| Invitation list shows it as `used`, attributed to the registrant | ✅ |
+| `GET /api/auth/export` returns only the caller's own data | ✅ no other users present |
+| Export is delivered as a file download | ✅ `content-disposition: attachment` |
+| A non-leader cannot change cell settings | ✅ 403 |
+
+### Bugs found by these tests and fixed
+
+These were found by running the tests, not by reading the code:
+
+1. **Public testimony with consent returned HTTP 500.** Consent was written to
+   `shared_publicly` at submission, which breached the table's own publish guard.
+   Consent is now stored per testimony in `consent_public`, and `shared_publicly`
+   is only set at approval — where it is also checked against that consent.
+2. **Public testimony without consent silently became private.** The API accepted
+   the request and stored something other than what was asked for. It now
+   refuses with a clear validation error.
+3. **`consent_records` has a unique key on `(user_id, consent_type,
+   policy_version)`**, so a member's second testimony raised a constraint error.
+   The account-level record is now upserted; the per-testimony consent lives on
+   the testimony.
+4. **`sharedPublicly` was returned as `0`/`1`** while every other boolean in the
+   API envelope is a real boolean. Now converted at the boundary.
+5. **`src/data/mockData.ts` was still imported by six screens** and the four
+   oversight dashboards showed invented statistics behind buttons that called
+   `console.log`. Removed and replaced with real data.
 
 ---
 
 ## Honest summary
 
-The **foundation is real**: a genuine multi-user system with server-side
-authentication, a real relational database with enforced integrity, real
-authorization, and a public join flow that a stranger can actually use.
+**The foundation is real and the product now sits on it.** A genuine multi-user
+system: server-side authentication with PBKDF2-hashed passwords and hashed
+session tokens, a real relational database with integrity enforced by
+constraints and triggers, real row-level authorization, and a public join flow a
+stranger can use.
 
-The **operational screens are not yet on that foundation** — they still show the
-original prototype's mock data. Wiring them is the next phase, and the adapter
-layer in `src/lib/adapters.ts` is where that work begins.
+**Every screen reads live data.** There is no mock data layer left in the
+codebase. Where a screen cannot do something, it says so — it does not simulate
+success.
+
+**What has not been done:**
+
+- No real browser was driven. Playwright could not download Chromium in the build
+  environment. The end-to-end coverage is real but runs through jsdom against the
+  live API, which exercises the components, contexts, adapters, HTTP layer and
+  database — it does not exercise paint, layout or touch behaviour. **Treat
+  visual and responsive behaviour as unverified until someone opens it.**
+- No load, penetration, or accessibility audit has been run. `prefers-reduced-motion`
+  is honoured and semantic roles/labels are used, but WCAG AA has not been tested
+  with a screen reader or an automated auditor.
+- Push/SMS/WhatsApp delivery is not connected; notifications are in-app only
+  (`MESSAGING_DRIVER=log`).
+- Nothing is deployed. `wrangler.toml` still holds placeholder resource IDs.
+- 11 npm advisories remain (5 high, 6 moderate) in development tooling
+  (`wrangler`, `miniflare`, `ws`, `vite`, `vitest`). The one **critical** advisory
+  (vitest UI arbitrary file read) has been fixed. Clearing the rest requires a
+  major `wrangler` upgrade, which is a separate, deliberate change.
+
+**Items needing confirmation from a pastor or zonal leader** — none of the
+following is asserted by this software; all of it is configurable data, and the
+defaults are placeholders:
+
+- The names and structure of district / area / zone / cell, and the titles used
+  for each role
+- Whether members may join an online cell directly, or must first be added by a
+  leader (currently a per-cell setting, defaulting to **closed**)
+- What a weekly report must contain, and who approves it
+- Whether a testimony may be shared publicly, and who authorises that
+- Any retention period for attendance and pastoral records
+- Whether the cell's meeting link may be published publicly (per-cell setting,
+  defaulting to **off**)

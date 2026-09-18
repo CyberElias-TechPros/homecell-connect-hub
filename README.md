@@ -66,64 +66,95 @@ npm install
 cd worker
 npx wrangler d1 migrations apply homecell-db --local
 
-# 2. Start the API (leave running) — http://127.0.0.1:8787
-npx wrangler dev --port 8787 --ip 0.0.0.0 --local
+# 2. Create a cell and two sign-in accounts
+cd .. && node worker/scripts/seed.mjs
 
-# 3. In a second terminal, start the frontend — http://localhost:8080
-cd ..
-npm run dev
+# 3. Start the API (leave running) — http://127.0.0.1:8787
+cd worker && npx wrangler dev --port 8787 --ip 0.0.0.0 --local
+
+# 4. In a second terminal, start the frontend — http://localhost:8080
+cd .. && npm run dev
 ```
 
 The frontend proxies `/api` and `/health` to the Worker, so the browser only
 ever talks to one origin. That keeps cookies and CORS simple and means the same
 code works when the two are deployed separately.
 
-### First run: create a cell
+### Seed a working cell
 
-The app needs at least one cell before anyone can join. After starting the
-Worker:
+The app needs at least one cell before anyone can join. One command creates an
+example organisation, a cell and two sign-in accounts:
+
+```bash
+node worker/scripts/seed.mjs            # local database
+node worker/scripts/seed.mjs --reset    # wipe first, then seed
+node worker/scripts/seed.mjs --remote   # a deployed database
+```
+
+It prints the accounts it created. Locally these are:
+
+| Role | Phone | Password |
+|---|---|---|
+| Cell leader | `+2348051112222` | `GraceLife2026!` |
+| Member | `+2348123456789` | `Member2026!` |
+
+Override them with `SEED_LEADER_PASSWORD` and `SEED_MEMBER_PASSWORD` before
+running against anything real. Passwords are hashed with the same PBKDF2
+parameters the Worker uses, so these accounts log in normally.
+
+Everything the seed creates is an **example**, not church policy — the district/
+area/zone names, the meeting time and the welcome message are ordinary data you
+edit from the app.
+
+Then visit `http://localhost:8080`. The landing page loads cell `HC1`, and a
+visitor can read about the cell and ask to join.
+
+### Accounts and roles
+
+Members register themselves from the public join page. A leader can also add
+someone directly, mark attendance on their behalf, and invite people with a
+single-use link (More → Invite people).
+
+Roles are **assigned by the server**. A user cannot pick their own role, and the
+previous build's role dropdown is gone. To promote someone:
 
 ```bash
 cd worker
-npx wrangler d1 execute homecell-db --local --command "
-INSERT INTO organizations (id,name,slug,timezone,created_at,updated_at)
-  VALUES ('org1','My Ministry','my-ministry','Africa/Lagos',datetime('now'),datetime('now'));
-INSERT INTO districts (id,organization_id,name,code,created_at,updated_at)
-  VALUES ('d1','org1','District 1','D1',datetime('now'),datetime('now'));
-INSERT INTO areas (id,district_id,name,code,created_at,updated_at)
-  VALUES ('a1','d1','Area 1','A1',datetime('now'),datetime('now'));
-INSERT INTO zones (id,area_id,name,code,created_at,updated_at)
-  VALUES ('z1','a1','Zone 1','Z1',datetime('now'),datetime('now'));
-INSERT INTO homecells (id,zone_id,name,code,timezone,meeting_day,meeting_time,auto_approve_members,created_at,updated_at)
-  VALUES ('hc1','z1','Grace Life Online Cell','HC1','Africa/Lagos','sunday','18:00',1,datetime('now'),datetime('now'));
-INSERT INTO app_settings (key,value,updated_at)
-  VALUES ('default_homecell_id','hc1',datetime('now'));
-"
-```
-
-Then visit `http://localhost:8080` — the landing page loads cell `HC1` and a
-visitor can register.
-
-To make yourself the leader of that cell, register normally and then promote
-yourself directly in the database (role changes require `manage_users`
-permission, so this is a deliberate bootstrap step rather than an API call):
-
-```bash
 npx wrangler d1 execute homecell-db --local --command \
   "UPDATE users SET role='leader', status='active' WHERE phone='+234XXXXXXXXXX';"
 ```
 
+This requires database access on purpose: role changes are a privileged
+operation with no self-service path.
+
 ## Tests
 
 ```bash
-npm run test          # vitest
-npx tsc --noEmit -p tsconfig.app.json
+npm run test                              # vitest — 30 tests
+npx tsc --noEmit -p tsconfig.app.json     # 0 errors
+cd worker && npx tsc --noEmit             # 0 errors
 npm run build
 ```
 
-The time zone logic in `src/lib/datetime.ts` is covered by 15 unit tests,
-including DST transitions, week roll-forward, and behaviour on invalid input
-(the function returns `null` rather than guessing a meeting time).
+Two kinds of test live here:
+
+- **Unit** — 15 tests for `src/lib/datetime.ts`, covering DST transitions, week
+  roll-forward and invalid input (it returns `null` rather than guessing a
+  meeting time).
+- **End-to-end** — `src/test/journeys.e2e.test.tsx`. These render the real page
+  components inside the same provider stack `App.tsx` mounts and hit a running
+  Worker. They are not mocked: a request composed in the UI is re-read from D1 to
+  prove it persisted.
+
+The end-to-end suite needs both servers running, and a freshly seeded database:
+
+```bash
+node worker/scripts/seed.mjs --reset   # terminal 1 (then start the servers)
+npx vitest run src/test/journeys.e2e.test.tsx
+```
+
+If the API is not reachable the suite **skips loudly** — it never passes against
+nothing. It talks to `TEST_API_BASE` (default `http://127.0.0.1:8080`).
 
 ## Security notes
 

@@ -1,9 +1,9 @@
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { MobileLayout, PageHeader, Section } from '@/components/layout/MobileLayout';
+import { useAuth } from '@/contexts/AuthContext';
 import { BottomNavigation } from '@/components/layout/BottomNavigation';
 import { Button } from '@/components/ui/button';
-import { mockAttendanceHistory, mockHomecell } from '@/data/mockData';
 import { useApp } from '@/contexts/AppContext';
 import { useAttendance } from '@/contexts/AttendanceContext';
 import { usePermissions } from '@/contexts/PermissionsContext';
@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 
 export function AttendanceScreen() {
+  const { user } = useAuth();
   const navigate = useNavigate();
   const { currentWeek } = useApp();
   const { getAttendanceHistory, getAttendanceStats, canMarkAttendance, canViewAttendance, isOnline, lastSyncAt } = useAttendance();
@@ -36,7 +37,7 @@ export function AttendanceScreen() {
     <MobileLayout>
       <PageHeader
         title="Attendance"
-        subtitle={mockHomecell.name}
+        subtitle={user?.homecellName ?? 'Your cell'}
         action={
           canMarkAttendance() ? (
             <Button

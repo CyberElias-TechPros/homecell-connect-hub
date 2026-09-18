@@ -18,7 +18,12 @@ interface PublicCell {
   welcomeMessage: string | null;
   leaderName: string | null;
   memberCount: number;
-  canJoinNow: boolean;
+  /** True only when the cell's leader has opened public joining. */
+  publicJoinOpen: boolean;
+  /** Present only when publicJoinOpen is true. */
+  meetingLink: string | null;
+  meetingPasscode: string | null;
+  joinInstructions: string | null;
 }
 
 const DEFAULT_CELL_CODE = (import.meta.env.VITE_CELL_CODE as string | undefined) ?? 'HC1';
@@ -160,6 +165,35 @@ export function LandingPage() {
                   This cell has not published its meeting schedule yet. You can still ask to join and
                   your leader will be in touch.
                 </p>
+              </div>
+            )}
+
+            {/* The meeting link, once the leader has published it. */}
+            {cell.publicJoinOpen && cell.meetingLink && (
+              <div className="mt-8 rounded-2xl bg-white/10 p-4 backdrop-blur-sm">
+                <p className="flex items-center gap-2 text-sm font-semibold text-primary-foreground">
+                  <Video className="h-4 w-4" aria-hidden />
+                  You can join the meeting directly
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <a
+                    href={cell.meetingLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-primary transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-primary"
+                  >
+                    Open the meeting
+                    <ArrowRight className="h-4 w-4" aria-hidden />
+                  </a>
+                  {cell.meetingPasscode && (
+                    <span className="text-sm text-primary-foreground/80">
+                      Passcode: <span className="font-mono font-semibold">{cell.meetingPasscode}</span>
+                    </span>
+                  )}
+                </div>
+                {cell.joinInstructions && (
+                  <p className="mt-2 text-xs text-primary-foreground/70">{cell.joinInstructions}</p>
+                )}
               </div>
             )}
 

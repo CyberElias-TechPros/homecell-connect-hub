@@ -21,7 +21,7 @@ pub.get('/cell/:code', async (c) => {
     .prepare(
       `SELECT h.id, h.name, h.code, h.address, h.meeting_day, h.meeting_time, h.timezone,
               h.meeting_link, h.meeting_platform, h.description, h.welcome_message,
-              h.is_active,
+              h.is_active, h.public_join_enabled, h.meeting_passcode, h.join_instructions,
               u.name AS leader_name,
               (SELECT COUNT(*) FROM users m WHERE m.homecell_id = h.id AND m.status = 'active') AS member_count
          FROM homecells h
@@ -33,6 +33,7 @@ pub.get('/cell/:code', async (c) => {
       id: string; name: string; code: string; address: string | null; meeting_day: string | null;
       meeting_time: string | null; timezone: string; meeting_link: string | null; meeting_platform: string | null;
       description: string | null; welcome_message: string | null; is_active: number;
+      public_join_enabled: number; meeting_passcode: string | null; join_instructions: string | null;
       leader_name: string | null; member_count: number;
     }>();
 
@@ -53,9 +54,18 @@ pub.get('/cell/:code', async (c) => {
       welcomeMessage: cell.welcome_message,
       leaderName: cell.leader_name,
       memberCount: cell.member_count,
-      // Only reveal the join link once someone is a member — it is not a
-      // public broadcast URL and may contain a passcode.
-      canJoinNow: Boolean(cell.meeting_link),
+      // The meeting link is only published when the cell's leader has
+      // explicitly opened public joining AND a link actually exists. A cell
+      // that has not opted in shows its schedule but no link.
+      ...(() => {
+        const publicJoinOpen = cell.public_join_enabled === 1 && Boolean(cell.meeting_link);
+        return {
+          publicJoinOpen,
+          meetingLink: publicJoinOpen ? cell.meeting_link : null,
+          meetingPasscode: publicJoinOpen ? cell.meeting_passcode : null,
+          joinInstructions: publicJoinOpen ? cell.join_instructions : null,
+        };
+      })(),
     },
     requestId,
   );

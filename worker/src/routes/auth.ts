@@ -532,3 +532,138 @@ auth.post('/password', async (c) => {
 
 export { publicUser };
 export default auth;
+
+// ---------------------------------------------------------------------------
+// GET /api/auth/export — the member's own data, in a portable form
+//
+// Data portability is a legal obligation (NDPA / GDPR), not a nicety. This
+// returns everything held about the signed-in user and nothing about anybody
+// else — including no leader-only notes.
+// ---------------------------------------------------------------------------
+auth.get('/export', async (c) => {
+  const requestId = c.get('requestId');
+  const user = requireUser(c);
+  await enforceRateLimit(c.env.DB, `export:${user.id}`, 5, 60 * 60 * 1000);
+
+  const [profile, attendance, followUps, prayer, testimonies, consents, notifications] = await Promise.all([
+    c.env.DB
+      .prepare(
+        `SELECT id, name, preferred_name, email, phone, gender, date_of_birth, role, status,
+                member_status, membership_type, is_first_timer, city, country, occupation,
+                skills, joined_date, created_at, updated_at
+           FROM users WHERE id = ?`,
+      )
+      .bind(user.id)
+      .first(),
+    c.env.DB
+      .prepare('SELECT meeting_date, status, is_first_timer, created_at FROM attendance_records WHERE member_id = ? ORDER BY meeting_date DESC')
+      .bind(user.id)
+      .all(),
+    c.env.DB
+      .prepare('SELECT reason, status, priority, due_date, outcome, created_at FROM follow_ups WHERE subject_id = ? ORDER BY created_at DESC')
+      .bind(user.id)
+      .all(),
+    c.env.DB
+      .prepare("SELECT title, body, status, visibility, created_at FROM prayer_requests WHERE author_id = ? AND visibility != 'private' ORDER BY created_at DESC")
+      .bind(user.id)
+      .all(),
+    c.env.DB
+      .prepare('SELECT title, body, status, visibility, created_at FROM testimonies WHERE author_id = ? ORDER BY created_at DESC')
+      .bind(user.id)
+      .all(),
+    c.env.DB
+      .prepare('SELECT consent_type, granted, policy_version, recorded_at FROM consent_records WHERE user_id = ? ORDER BY recorded_at DESC')
+      .bind(user.id)
+      .all(),
+    c.env.DB
+      .prepare('SELECT type, title, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 200')
+      .bind(user.id)
+      .all(),
+  ]);
+
+  const exportPayload = {
+    exportedAt: nowIso(),
+    exportVersion: 1,
+    about: 'This is a copy of the information held about you on this platform.',
+    profile,
+    attendance: attendance.results,
+    followUps: followUps.results,
+    prayerRequests: prayer.results,
+    testimonies: testimonies.results,
+    consents: consents.results,
+    notifications: notifications.results,
+  };
+
+  await writeAudit(c.env.DB, {
+    actorId: user.id,
+    action: 'user.data.export',
+    entityType: 'user',
+    entityId: user.id,
+    homecellId: user.homecellId,
+    ip: clientIp(c.req.raw),
+  });
+
+  // Delivered as a file download rather than JSON in the page.
+  return new Response(JSON.stringify(exportPayload, null, 2), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'content-disposition': `attachment; filename="my-data-${nowIso().slice(0, 10)}.json"`,
+      'cache-control': 'no-store',
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/deletion-request — ask for the account to be erased
+//
+// Recorded as an auditable request rather than deleting immediately: a cell
+// leader may need to confirm the person's identity first, and irreversible
+// deletion on an unauthenticated-ish action would be reckless. The request
+// notifies the cell's leaders so it is actually actioned.
+// ---------------------------------------------------------------------------
+auth.post('/deletion-request', async (c) => {
+  const requestId = c.get('requestId');
+  const user = requireUser(c);
+  await enforceRateLimit(c.env.DB, `delreq:${user.id}`, 3, 24 * 60 * 60 * 1000);
+
+  const body = await readJson<{ reason?: string }>(c.req.raw);
+  const now = nowIso();
+
+  await writeAudit(c.env.DB, {
+    actorId: user.id,
+    action: 'user.deletion.request',
+    entityType: 'user',
+    entityId: user.id,
+    homecellId: user.homecellId,
+    after: { reason: body.reason ? String(body.reason).slice(0, 500) : null },
+    ip: clientIp(c.req.raw),
+  });
+
+  if (user.homecellId) {
+    const { results: leaders } = await c.env.DB
+      .prepare("SELECT id FROM users WHERE homecell_id = ? AND role IN ('leader','assistant','admin','super_admin') AND id != ?")
+      .bind(user.homecellId, user.id)
+      .all<{ id: string }>();
+
+    for (const leader of leaders) {
+      await c.env.DB
+        .prepare(
+          `INSERT INTO notifications (id, user_id, type, title, body, link, severity, created_at)
+           VALUES (?,?,?,?,?,?,?,?)`,
+        )
+        .bind(newId('ntf'), leader.id, 'deletion_request', 'A member has requested account deletion',
+              `${user.name} has asked for their data to be removed.`, '/members', 'warning', now)
+        .run();
+    }
+  }
+
+  return json(
+    {
+      ok: true,
+      message:
+        'Your request has been recorded and passed to your cell leader. You will be contacted to confirm before anything is removed.',
+    },
+    requestId,
+  );
+});

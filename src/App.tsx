@@ -12,6 +12,8 @@ import { ReportsProvider } from "@/contexts/ReportsContext";
 import { MaterialsProvider } from "@/contexts/MaterialsContext";
 import { AnnouncementsProvider } from "@/contexts/AnnouncementsContext";
 import { FollowUpsProvider } from "@/contexts/FollowUpsContext";
+import { PrayerProvider } from "@/contexts/PrayerContext";
+import { TestimoniesProvider } from "@/contexts/TestimoniesContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 // Public pages
@@ -35,6 +37,11 @@ import { MorePage } from "@/pages/MorePage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { FollowUpsPage } from "@/pages/FollowUpsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
+import { PrayerPage } from "@/pages/PrayerPage";
+import { TestimoniesPage } from "@/pages/TestimoniesPage";
+import { InvitePage } from "@/pages/InvitePage";
+import { PrivacyPage } from "@/pages/PrivacyPage";
+import { CellSettingsPage } from "@/pages/CellSettingsPage";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -50,6 +57,8 @@ const App = () => (
                 <MaterialsProvider>
                   <AnnouncementsProvider>
                     <FollowUpsProvider>
+                   <PrayerProvider>
+                    <TestimoniesProvider>
                     <TooltipProvider>
                       <Toaster />
                       <Sonner />
@@ -102,12 +111,23 @@ const App = () => (
                           <Route path="/more" element={<ProtectedRoute><MorePage /></ProtectedRoute>} />
                           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
                           <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
+                          <Route path="/prayer" element={<ProtectedRoute><PrayerPage /></ProtectedRoute>} />
+                          <Route path="/testimonies" element={<ProtectedRoute><TestimoniesPage /></ProtectedRoute>} />
+                          <Route path="/invite" element={
+                            <ProtectedRoute requiredPermissions={['manage_invitations']}><InvitePage /></ProtectedRoute>
+                          } />
+                          <Route path="/privacy" element={<ProtectedRoute><PrivacyPage /></ProtectedRoute>} />
+                          <Route path="/cell-settings" element={
+                            <ProtectedRoute requiredPermissions={['manage_homecell_settings']}><CellSettingsPage /></ProtectedRoute>
+                          } />
 
                           <Route path="*" element={<NotFound />} />
                         </Routes>
                       </BrowserRouter>
                       </TooltipProvider>
-                    </FollowUpsProvider>
+                    </TestimoniesProvider>
+                   </PrayerProvider>
+                  </FollowUpsProvider>
                   </AnnouncementsProvider>
                 </MaterialsProvider>
               </ReportsProvider>

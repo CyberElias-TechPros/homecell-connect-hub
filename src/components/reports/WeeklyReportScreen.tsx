@@ -2,13 +2,13 @@ import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { MobileLayout, PageHeader, Section } from '@/components/layout/MobileLayout';
+import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { mockHomecell } from '@/data/mockData';
 import { useApp } from '@/contexts/AppContext';
 import { useReports } from '@/contexts/ReportsContext';
 import {
@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 
 export function WeeklyReportScreen() {
+  const { user } = useAuth();
   const navigate = useNavigate();
   const { currentWeek } = useApp();
   const {
@@ -234,7 +235,7 @@ export function WeeklyReportScreen() {
           className="bg-muted/50 rounded-xl p-4 mb-6"
         >
           <p className="text-sm text-muted-foreground">Submitting for</p>
-          <p className="font-serif font-semibold text-foreground">{mockHomecell.name}</p>
+          <p className="font-serif font-semibold text-foreground">{user?.homecellName ?? 'Your cell'}</p>
         </motion.div>
 
         {/* Attendance Section - Auto-filled */}

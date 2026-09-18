@@ -28,7 +28,6 @@ import {
   Search
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { mockAnnouncements } from '@/data/mockData';
 
 export function AnnouncementsScreen() {
   const navigate = useNavigate();

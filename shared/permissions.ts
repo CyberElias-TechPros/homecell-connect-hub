@@ -90,6 +90,8 @@ export const ALL_PERMISSIONS = [
   'manage_invitations',
   'view_audit_logs',
   'system_admin',
+  // homecell configuration
+  'manage_homecell_settings',
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
@@ -119,6 +121,7 @@ const CELL_WORKER: Permission[] = [
   'view_private_prayer_requests',
   'manage_prayer_requests',
   'manage_invitations',
+  'manage_homecell_settings',
 ];
 
 const ZONAL: Permission[] = [

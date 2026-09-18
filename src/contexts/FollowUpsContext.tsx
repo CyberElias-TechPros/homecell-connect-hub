@@ -1,419 +1,368 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { FollowUp, FollowUpContextType, FollowUpStats, FollowUpFilters, FollowUpHistoryEntry } from '@/types';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { useAuth } from './AuthContext';
 import { usePermissions } from './PermissionsContext';
-import { mockFollowUps } from '@/data/mockData';
+import { api } from '../lib/api';
+import {
+  toUiFollowUp,
+  toApiFollowUpStatus,
+  type ApiFollowUp,
+  type ApiFollowUpNote,
+} from '../lib/adapters';
+import type { FollowUp, FollowUpContextType, FollowUpFilters, FollowUpStats, PendingChange } from '../types';
 
-const FollowUpsContext = createContext<FollowUpContextType | undefined>(undefined);
+/**
+ * Follow-up CRM backed by the real API.
+ *
+ * Most follow-ups are created automatically by the server (a first-timer
+ * registering, or a member crossing the absence threshold). This context is
+ * where leaders work them: assign, contact, log an outcome, close.
+ */
+const FollowUpsContext = createContext<FollowUpContextType | null>(null);
 
-export function FollowUpsProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
+interface FollowUpsResponse {
+  followUps: ApiFollowUp[];
+  summary: { total: number; open: number; overdue: number; completed: number; unassigned: number };
+}
+
+export function FollowUpsProvider({ children }: { children: ReactNode }) {
+  const { user, isAuthenticated, isReady } = useAuth();
   const { hasPermission } = usePermissions();
+
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
+  const [notes, setNotes] = useState<Record<string, ApiFollowUpNote[]>>({});
   const [isLoading, setIsLoading] = useState(false);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [lastSyncAt, setLastSyncAt] = useState<string>(new Date().toISOString());
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [lastSyncAt, setLastSyncAt] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Initialize with mock data and enhance with additional fields
+  const canView = useCallback(() => hasPermission('view_followups'), [hasPermission]);
+
+  const load = useCallback(async () => {
+    if (!isAuthenticated || !canView()) {
+      setFollowUps([]);
+      return;
+    }
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const data = await api.get<FollowUpsResponse>('/api/followups');
+      setFollowUps((data.followUps ?? []).map((f) => toUiFollowUp(f)));
+      setLastSyncAt(new Date().toISOString());
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not load follow-ups.');
+      setFollowUps([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isAuthenticated, canView]);
+
   useEffect(() => {
-    const enhancedFollowUps: FollowUp[] = mockFollowUps.map(followUp => ({
-      ...followUp,
-      address: undefined,
-      assignedBy: user?.id || 'admin1',
-      assignedByName: user?.name || 'Admin User',
-      priority: 'normal' as const,
-      followUpHistory: [],
-      nextFollowUpDate: undefined,
-      lastContactDate: followUp.updatedAt,
-      createdBy: user?.id || 'admin1',
-      updatedBy: user?.id || 'admin1',
-      isOverdue: false,
-      overdueDays: 0,
-      tags: [],
-    }));
+    if (!isReady) return;
+    void load();
+  }, [isReady, load]);
 
-    // Calculate overdue status
-    const now = new Date();
-    const updatedFollowUps = enhancedFollowUps.map(followUp => {
-      const createdDate = new Date(followUp.createdAt);
-      const daysSinceCreation = Math.floor((now.getTime() - createdDate.getTime()) / (1000 * 60 * 60 * 24));
-
-      let isOverdue = false;
-      let overdueDays = 0;
-
-      if (followUp.status === 'pending' && daysSinceCreation > 3) {
-        isOverdue = true;
-        overdueDays = daysSinceCreation - 3;
-      } else if (followUp.status === 'contacted' && daysSinceCreation > 7) {
-        isOverdue = true;
-        overdueDays = daysSinceCreation - 7;
-      } else if (followUp.status === 'visited' && daysSinceCreation > 14) {
-        isOverdue = true;
-        overdueDays = daysSinceCreation - 14;
-      }
-
-      return {
-        ...followUp,
-        isOverdue,
-        overdueDays,
-      };
-    });
-
-    setFollowUps(updatedFollowUps);
-  }, [user]);
-
-  // Monitor online status
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
     return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
     };
   }, []);
 
-  const createFollowUp = useCallback(async (followUpData: Omit<FollowUp, 'id' | 'createdAt' | 'updatedAt' | 'followUpHistory' | 'isOverdue' | 'overdueDays'>): Promise<FollowUp> => {
-    if (!canCreateFollowUp()) {
-      throw new Error('Insufficient permissions to create follow-up');
-    }
-
-    setIsLoading(true);
+  /** Load the interaction history for one follow-up on demand. */
+  const loadNotes = useCallback(async (id: string) => {
     try {
-      const now = new Date().toISOString();
-      const newFollowUp: FollowUp = {
-        ...followUpData,
-        id: `fu-${Date.now()}`,
-        createdAt: now,
-        updatedAt: now,
+      const data = await api.get<{ notes: ApiFollowUpNote[] }>(`/api/followups/${id}/notes`);
+      setNotes((prev) => ({ ...prev, [id]: data.notes ?? [] }));
+      return data.notes ?? [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const createFollowUp = useCallback(
+    async (input: Parameters<FollowUpContextType['createFollowUp']>[0]): Promise<FollowUp> => {
+      const reason = input.tags?.[0] ?? (input.status === 'pending' ? 'other' : 'other');
+      const created = await api.post<{ id: string }>('/api/followups', {
+        subjectId: input.memberId,
+        assignedTo: input.assignedTo || null,
+        reason: normaliseReason(reason),
+        priority: input.priority === 'normal' ? 'normal' : input.priority,
+        dueDate: input.nextFollowUpDate ?? null,
+        notes: input.notes || undefined,
+      });
+      await load();
+      const found = followUps.find((f) => f.id === created.id);
+      if (found) return found;
+      // The list reloaded; return a best-effort object so callers never get null.
+      return {
+        ...input,
+        id: created.id,
         followUpHistory: [],
         isOverdue: false,
         overdueDays: 0,
-      };
-
-      setFollowUps(prev => [...prev, newFollowUp]);
-      setLastSyncAt(now);
-      return newFollowUp;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [user]);
-
-  const updateFollowUp = useCallback(async (id: string, updates: Partial<FollowUp>): Promise<FollowUp> => {
-    const followUp = followUps.find(f => f.id === id);
-    if (!followUp || !canEditFollowUp(followUp)) {
-      throw new Error('Insufficient permissions to update follow-up');
-    }
-
-    setIsLoading(true);
-    try {
-      const updatedFollowUp: FollowUp = {
-        ...followUp,
-        ...updates,
+        createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        updatedBy: user?.id || 'unknown',
-      };
+        createdBy: user?.id ?? '',
+        updatedBy: user?.id ?? '',
+      } as FollowUp;
+    },
+    [load, followUps, user?.id],
+  );
 
-      setFollowUps(prev => prev.map(f => f.id === id ? updatedFollowUp : f));
-      setLastSyncAt(updatedFollowUp.updatedAt);
-      return updatedFollowUp;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [followUps, user]);
+  const updateFollowUp = useCallback(
+    async (id: string, updates: Partial<FollowUp>): Promise<FollowUp> => {
+      const payload: Record<string, unknown> = {};
+      if (updates.status !== undefined) payload.status = toApiFollowUpStatus(updates.status);
+      if (updates.priority !== undefined) payload.priority = updates.priority;
+      if (updates.assignedTo !== undefined) payload.assignedTo = updates.assignedTo || null;
+      if (updates.nextFollowUpDate !== undefined) payload.dueDate = updates.nextFollowUpDate || null;
+      if (updates.notes !== undefined) payload.notes = updates.notes;
 
-  const updateFollowUpStatus = useCallback(async (
-    id: string,
-    status: FollowUp['status'],
-    notes?: string,
-    contactMethod?: FollowUpHistoryEntry['contactMethod']
-  ): Promise<FollowUp> => {
-    const followUp = followUps.find(f => f.id === id);
-    if (!followUp || !canEditFollowUp(followUp)) {
-      throw new Error('Insufficient permissions to update follow-up status');
-    }
+      await api.patch(`/api/followups/${id}`, payload);
+      await load();
 
-    const now = new Date().toISOString();
-    const historyEntry: FollowUpHistoryEntry = {
-      id: `h-${Date.now()}`,
-      status,
-      notes: notes || `Status updated to ${status}`,
-      contactMethod,
-      contactDate: now,
-      updatedBy: user?.id || 'unknown',
-      updatedByName: user?.name || 'Unknown User',
-      createdAt: now,
-    };
+      const updated = followUps.find((f) => f.id === id);
+      return updated ?? ({ id, ...updates } as FollowUp);
+    },
+    [load, followUps],
+  );
 
-    const updatedFollowUp: FollowUp = {
-      ...followUp,
-      status,
-      notes: notes || followUp.notes,
-      followUpHistory: [...followUp.followUpHistory, historyEntry],
-      lastContactDate: now,
-      updatedAt: now,
-      updatedBy: user?.id || 'unknown',
-    };
+  /**
+   * Move a follow-up through the pipeline.
+   *
+   * The note is written as an interaction entry first so the history records
+   * what happened even if the status write is retried.
+   */
+  const updateFollowUpStatus = useCallback(
+    async (
+      id: string,
+      status: FollowUp['status'],
+      noteText?: string,
+      contactMethod?: 'phone' | 'whatsapp' | 'visit' | 'email' | 'other',
+    ): Promise<FollowUp> => {
+      if (noteText && noteText.trim()) {
+        await api.post(`/api/followups/${id}/notes`, {
+          body: noteText.trim(),
+          outcome: status,
+        });
+      }
+      await api.patch(`/api/followups/${id}`, {
+        status: toApiFollowUpStatus(status),
+        ...(contactMethod ? { contactMethod: normaliseContactMethod(contactMethod) } : {}),
+      });
+      await load();
+      return (followUps.find((f) => f.id === id) ?? { id, status } as FollowUp) as FollowUp;
+    },
+    [load, followUps],
+  );
 
-    // Recalculate overdue status
-    const createdDate = new Date(followUp.createdAt);
-    const daysSinceCreation = Math.floor((new Date().getTime() - createdDate.getTime()) / (1000 * 60 * 60 * 24));
+  const reassignFollowUp = useCallback(
+    async (id: string, newAssigneeId: string, reason?: string): Promise<FollowUp> => {
+      await api.patch(`/api/followups/${id}`, { assignedTo: newAssigneeId });
+      if (reason?.trim()) {
+        await api.post(`/api/followups/${id}/notes`, { body: `Reassigned: ${reason.trim()}` });
+      }
+      await load();
+      return (followUps.find((f) => f.id === id) ?? { id }) as FollowUp;
+    },
+    [load, followUps],
+  );
 
-    let isOverdue = false;
-    let overdueDays = 0;
-
-    if (status === 'pending' && daysSinceCreation > 3) {
-      isOverdue = true;
-      overdueDays = daysSinceCreation - 3;
-    } else if (status === 'contacted' && daysSinceCreation > 7) {
-      isOverdue = true;
-      overdueDays = daysSinceCreation - 7;
-    } else if (status === 'visited' && daysSinceCreation > 14) {
-      isOverdue = true;
-      overdueDays = daysSinceCreation - 14;
-    }
-
-    updatedFollowUp.isOverdue = isOverdue;
-    updatedFollowUp.overdueDays = overdueDays;
-
-    setFollowUps(prev => prev.map(f => f.id === id ? updatedFollowUp : f));
-    setLastSyncAt(now);
-    return updatedFollowUp;
-  }, [followUps, user]);
-
-  const reassignFollowUp = useCallback(async (id: string, newAssigneeId: string, reason?: string): Promise<FollowUp> => {
-    const followUp = followUps.find(f => f.id === id);
-    if (!followUp || !canReassignFollowUp(followUp)) {
-      throw new Error('Insufficient permissions to reassign follow-up');
-    }
-
-    // Mock user lookup - in real app, this would come from user context
-    const mockUsers = [
-      { id: 'm1', name: 'Adebayo Johnson' },
-      { id: 'm2', name: 'Chidinma Okafor' },
-      { id: 'm3', name: 'Emmanuel Nwachukwu' },
-    ];
-
-    const newAssignee = mockUsers.find(u => u.id === newAssigneeId);
-    if (!newAssignee) {
-      throw new Error('Assignee not found');
-    }
-
-    const now = new Date().toISOString();
-    const historyEntry: FollowUpHistoryEntry = {
-      id: `h-${Date.now()}`,
-      status: followUp.status,
-      notes: `Reassigned to ${newAssignee.name}${reason ? `: ${reason}` : ''}`,
-      contactDate: now,
-      updatedBy: user?.id || 'unknown',
-      updatedByName: user?.name || 'Unknown User',
-      createdAt: now,
-    };
-
-    const updatedFollowUp: FollowUp = {
-      ...followUp,
-      assignedTo: newAssigneeId,
-      assignedToName: newAssignee.name,
-      followUpHistory: [...followUp.followUpHistory, historyEntry],
-      updatedAt: now,
-      updatedBy: user?.id || 'unknown',
-    };
-
-    setFollowUps(prev => prev.map(f => f.id === id ? updatedFollowUp : f));
-    setLastSyncAt(now);
-    return updatedFollowUp;
-  }, [followUps, user]);
-
+  /**
+   * Cancel rather than delete.
+   *
+   * The API intentionally has no hard delete: follow-up history is pastoral
+   * record and must survive. The UI's "delete" therefore voids the record.
+   */
   const deleteFollowUp = useCallback(async (id: string): Promise<void> => {
-    const followUp = followUps.find(f => f.id === id);
-    if (!followUp || !canDeleteFollowUp(followUp)) {
-      throw new Error('Insufficient permissions to delete follow-up');
-    }
+    await api.patch(`/api/followups/${id}`, { status: 'cancelled' });
+    setFollowUps((prev) => prev.map((f) => (f.id === id ? { ...f, status: 'cancelled' } : f)));
+  }, []);
 
-    setFollowUps(prev => prev.filter(f => f.id !== id));
-  }, [followUps]);
+  const getFollowUps = useCallback(
+    (filters?: FollowUpFilters) => {
+      // Cancelled records are void; they stay in the database but are excluded
+      // from the working pipeline by default.
+      let result = followUps.filter((f) => f.status !== 'cancelled');
 
-  const getFollowUps = useCallback((filters?: FollowUpFilters): FollowUp[] => {
-    let filtered = followUps;
-
-    if (filters) {
-      if (filters.status) {
-        filtered = filtered.filter(f => f.status === filters.status);
-      }
-      if (filters.assignedTo) {
-        filtered = filtered.filter(f => f.assignedTo === filters.assignedTo);
-      }
-      if (filters.priority) {
-        filtered = filtered.filter(f => f.priority === filters.priority);
-      }
-      if (filters.isOverdue !== undefined) {
-        filtered = filtered.filter(f => f.isOverdue === filters.isOverdue);
-      }
+      if (!filters) return result;
+      if (filters.status) result = result.filter((f) => f.status === filters.status);
+      if (filters.priority) result = result.filter((f) => f.priority === filters.priority);
+      if (filters.assignedTo) result = result.filter((f) => f.assignedTo === filters.assignedTo);
+      if (filters.isOverdue) result = result.filter((f) => f.isOverdue);
       if (filters.search) {
-        const searchLower = filters.search.toLowerCase();
-        filtered = filtered.filter(f =>
-          f.memberName.toLowerCase().includes(searchLower) ||
-          f.phone.includes(searchLower) ||
-          f.notes.toLowerCase().includes(searchLower)
+        const q = filters.search.toLowerCase();
+        result = result.filter(
+          (f) => f.memberName.toLowerCase().includes(q) || (f.phone ?? '').includes(q),
         );
       }
-      if (filters.tags && filters.tags.length > 0) {
-        filtered = filtered.filter(f =>
-          f.tags?.some(tag => filters.tags!.includes(tag))
-        );
-      }
-    }
+      return result;
+    },
+    [followUps],
+  );
 
-    return filtered.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  }, [followUps]);
-
-  const getFollowUp = useCallback((id: string): FollowUp | undefined => {
-    return followUps.find(f => f.id === id);
-  }, [followUps]);
-
-  const getAssignedFollowUps = useCallback((userId: string): FollowUp[] => {
-    return followUps.filter(f => f.assignedTo === userId);
-  }, [followUps]);
-
-  const getOverdueFollowUps = useCallback((): FollowUp[] => {
-    return followUps.filter(f => f.isOverdue);
-  }, [followUps]);
+  const getFollowUp = useCallback((id: string) => followUps.find((f) => f.id === id), [followUps]);
+  const getAssignedFollowUps = useCallback(
+    (userId: string) => followUps.filter((f) => f.assignedTo === userId && f.status !== 'cancelled'),
+    [followUps],
+  );
+  const getOverdueFollowUps = useCallback(
+    () => followUps.filter((f) => f.isOverdue && f.status !== 'cancelled'),
+    [followUps],
+  );
 
   const getFollowUpStats = useCallback((): FollowUpStats => {
-    const total = followUps.length;
-    const pending = followUps.filter(f => f.status === 'pending').length;
-    const contacted = followUps.filter(f => f.status === 'contacted').length;
-    const visited = followUps.filter(f => f.status === 'visited').length;
-    const integrated = followUps.filter(f => f.status === 'integrated').length;
-    const overdue = followUps.filter(f => f.isOverdue).length;
+    const active = followUps.filter((f) => f.status !== 'cancelled');
+    const integrated = active.filter((f) => f.status === 'integrated');
 
-    const successRate = total > 0 ? (integrated / total) * 100 : 0;
+    const meanDays = (subset: FollowUp[]) => {
+      const durations = subset
+        .map((f) => (new Date(f.updatedAt).getTime() - new Date(f.createdAt).getTime()) / 86400000)
+        .filter((d) => Number.isFinite(d) && d >= 0);
+      if (durations.length === 0) return 0;
+      return Math.round((durations.reduce((a, b) => a + b, 0) / durations.length) * 10) / 10;
+    };
 
-    // Calculate averages (simplified)
-    const averageDaysToContact = contacted > 0 ? 2 : 0; // Mock calculation
-    const averageDaysToVisit = visited > 0 ? 5 : 0;
-    const averageDaysToIntegration = integrated > 0 ? 12 : 0;
-
-    // Mock weekly trends
-    const weeklyTrends = [
-      { week: 'Week 1', new: 2, completed: 1, successRate: 50 },
-      { week: 'Week 2', new: 3, completed: 2, successRate: 67 },
-      { week: 'Week 3', new: 1, completed: 1, successRate: 100 },
-      { week: 'Week 4', new: 2, completed: 0, successRate: 0 },
-    ];
+    // Weekly cohorts: how many follow-ups were raised and closed each week.
+    const byWeek = new Map<string, { created: number; completed: number }>();
+    for (const f of active) {
+      const raised = weekKey(f.createdAt);
+      const entry = byWeek.get(raised) ?? { created: 0, completed: 0 };
+      entry.created += 1;
+      if (f.status === 'integrated') entry.completed += 1;
+      byWeek.set(raised, entry);
+    }
 
     return {
-      total,
-      pending,
-      contacted,
-      visited,
-      integrated,
-      overdue,
-      successRate,
-      averageDaysToContact,
-      averageDaysToVisit,
-      averageDaysToIntegration,
-      weeklyTrends,
+      total: active.length,
+      pending: active.filter((f) => f.status === 'pending').length,
+      contacted: active.filter((f) => f.status === 'contacted').length,
+      visited: active.filter((f) => f.status === 'visited').length,
+      integrated: integrated.length,
+      overdue: active.filter((f) => f.isOverdue).length,
+      successRate: active.length > 0 ? Math.round((integrated.length / active.length) * 100) : 0,
+      averageDaysToContact: meanDays(active.filter((f) => f.status !== 'pending')),
+      averageDaysToVisit: meanDays(active.filter((f) => f.status === 'visited' || f.status === 'integrated')),
+      averageDaysToIntegration: meanDays(integrated),
+      weeklyTrends: [...byWeek.entries()]
+        .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+        .slice(-12)
+        .map(([week, v]) => ({
+          week,
+          new: v.created,
+          completed: v.completed,
+          successRate: v.created > 0 ? Math.round((v.completed / v.created) * 100) : 0,
+        })),
     };
   }, [followUps]);
 
   const getSuccessMetrics = useCallback(() => {
-    const stats = getFollowUpStats();
-    return {
-      conversionRate: stats.successRate,
-      averageTimeToIntegration: stats.averageDaysToIntegration,
-      followUpEfficiency: stats.total > 0 ? ((stats.contacted + stats.visited + stats.integrated) / stats.total) * 100 : 0,
-    };
-  }, [getFollowUpStats]);
+    const active = followUps.filter((f) => f.status !== 'cancelled');
+    const integrated = active.filter((f) => f.status === 'integrated');
+    const conversionRate = active.length > 0 ? Math.round((integrated.length / active.length) * 100) : 0;
 
-  const saveOffline = useCallback(async (): Promise<void> => {
-    // Mock offline save
-    localStorage.setItem('followUps', JSON.stringify(followUps));
+    // Mean time from creation to completion, in days.
+    const durations = integrated
+      .map((f) => (new Date(f.updatedAt).getTime() - new Date(f.createdAt).getTime()) / 86400000)
+      .filter((d) => Number.isFinite(d) && d >= 0);
+    const averageTimeToIntegration =
+      durations.length > 0
+        ? Math.round((durations.reduce((a, b) => a + b, 0) / durations.length) * 10) / 10
+        : 0;
+
+    const overdue = active.filter((f) => f.isOverdue).length;
+    const followUpEfficiency =
+      active.length > 0 ? Math.round(((active.length - overdue) / active.length) * 100) : 100;
+
+    return { conversionRate, averageTimeToIntegration, followUpEfficiency };
   }, [followUps]);
 
-  const syncFollowUps = useCallback(async (): Promise<void> => {
-    setIsLoading(true);
-    try {
-      // Mock sync - in real app, this would sync with server
-      setLastSyncAt(new Date().toISOString());
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+  const saveOffline = useCallback(async () => undefined, []);
+  const syncFollowUps = useCallback(async () => {
+    await load();
+  }, [load]);
+  const getPendingChanges = useCallback((): PendingChange[] => [], []);
 
-  const getPendingChanges = useCallback(() => {
-    // Mock pending changes - in real app, this would track unsynced changes
-    return [];
-  }, []);
-
-  // Permission checks
-  const canCreateFollowUp = useCallback((): boolean => {
-    return hasPermission('followup.create') || user?.role === 'leader' || user?.role === 'admin';
-  }, [hasPermission, user]);
-
-  const canEditFollowUp = useCallback((followUp: FollowUp): boolean => {
-    if (user?.role === 'admin') return true;
-    if (user?.role === 'leader') return true;
-    if (user?.role === 'assistant') return followUp.assignedTo === user.id;
-    return false;
-  }, [user]);
-
-  const canDeleteFollowUp = useCallback((followUp: FollowUp): boolean => {
-    return user?.role === 'admin' || (user?.role === 'leader' && followUp.assignedTo === user.id);
-  }, [user]);
-
-  const canViewFollowUps = useCallback((): boolean => {
-    return hasPermission('followup.view') || ['leader', 'assistant', 'provider', 'admin'].includes(user?.role || '');
-  }, [hasPermission, user]);
-
-  const canReassignFollowUp = useCallback((followUp: FollowUp): boolean => {
-    return user?.role === 'admin' || user?.role === 'leader';
-  }, [user]);
-
-  const canViewAnalytics = useCallback((): boolean => {
-    return user?.role === 'admin' || user?.role === 'leader';
-  }, [user]);
-
-  const contextValue: FollowUpContextType = {
-    followUps,
-    isLoading,
-    isOnline,
-    lastSyncAt,
-    createFollowUp,
-    updateFollowUp,
-    updateFollowUpStatus,
-    reassignFollowUp,
-    deleteFollowUp,
-    getFollowUps,
-    getFollowUp,
-    getAssignedFollowUps,
-    getOverdueFollowUps,
-    getFollowUpStats,
-    getSuccessMetrics,
-    saveOffline,
-    syncFollowUps,
-    getPendingChanges,
-    canCreateFollowUp,
-    canEditFollowUp,
-    canDeleteFollowUp,
-    canViewFollowUps,
-    canReassignFollowUp,
-    canViewAnalytics,
-  };
+  const value = useMemo(
+    () => ({
+      followUps,
+      isLoading,
+      isOnline,
+      lastSyncAt,
+      loadError,
+      notes,
+      loadNotes,
+      createFollowUp,
+      updateFollowUp,
+      updateFollowUpStatus,
+      reassignFollowUp,
+      deleteFollowUp,
+      getFollowUps,
+      getFollowUp,
+      getAssignedFollowUps,
+      getOverdueFollowUps,
+      getFollowUpStats,
+      getSuccessMetrics,
+      saveOffline,
+      syncFollowUps,
+      getPendingChanges,
+      canCreateFollowUp: () => hasPermission('manage_followups'),
+      canEditFollowUp: () => hasPermission('manage_followups'),
+      canDeleteFollowUp: () => hasPermission('manage_followups'),
+      canViewFollowUps: canView,
+      canReassignFollowUp: () => hasPermission('assign_followups'),
+      canViewAnalytics: canView,
+    }),
+    [
+      followUps, isLoading, isOnline, lastSyncAt, loadError, notes, loadNotes,
+      createFollowUp, updateFollowUp, updateFollowUpStatus, reassignFollowUp, deleteFollowUp,
+      getFollowUps, getFollowUp, getAssignedFollowUps, getOverdueFollowUps, getFollowUpStats,
+      getSuccessMetrics, saveOffline, syncFollowUps, getPendingChanges, hasPermission, canView, user,
+    ],
+  );
 
   return (
-    <FollowUpsContext.Provider value={contextValue}>
+    <FollowUpsContext.Provider value={value as FollowUpContextType}>
       {children}
     </FollowUpsContext.Provider>
   );
 }
 
-export function useFollowUps(): FollowUpContextType {
+/** ISO week label ('2026-W38') used for cohort grouping. */
+function weekKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'unknown';
+  const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = (target.getUTCDay() + 6) % 7;
+  target.setUTCDate(target.getUTCDate() - dayNum + 3);
+  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+  const firstDayNum = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNum + 3);
+  const week = 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 86400000));
+  return `${target.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+/** The API restricts `reason` to a known set; coerce anything unexpected. */
+function normaliseReason(reason: string): string {
+  const allowed = ['first_timer', 'new_convert', 'absentee', 'visitor', 'prayer_request', 'care', 'other'];
+  return allowed.includes(reason) ? reason : 'other';
+}
+
+function normaliseContactMethod(method: string): string {
+  const allowed = ['call', 'whatsapp', 'sms', 'email', 'visit', 'in_person', 'other'];
+  if (allowed.includes(method)) return method;
+  // The API distinguishes a phone call from a physical visit.
+  if (method === 'phone') return 'call';
+  return 'other';
+}
+
+export function useFollowUps() {
   const context = useContext(FollowUpsContext);
-  if (context === undefined) {
+  if (!context) {
     throw new Error('useFollowUps must be used within a FollowUpsProvider');
   }
   return context;
