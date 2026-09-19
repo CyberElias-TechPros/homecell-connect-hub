@@ -1,353 +1,227 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { useAuth } from './AuthContext';
 import { usePermissions } from './PermissionsContext';
+import { api, ApiError } from '../lib/api';
 import {
-  AttendanceRecord,
-  WeeklyAttendance,
-  AttendanceStats,
-  AttendanceContextType
-} from '../types';
-import { mockMembers, mockAttendanceHistory } from '../data/mockData';
+  groupAttendanceByMeeting,
+  computeAttendanceStats,
+  todayIso,
+  weekEndingFrom,
+  type ApiAttendanceRecord,
+} from '../lib/adapters';
+import type { WeeklyAttendance, AttendanceContextType, AttendanceStats } from '../types';
 
+/**
+ * Attendance, backed by the real API.
+ *
+ * Marking is optimistic: the checkbox updates immediately for responsiveness,
+ * but the authoritative record only exists once the server confirms it. If the
+ * save fails the draft is retained (never silently discarded) and the error is
+ * surfaced to the caller.
+ */
 const AttendanceContext = createContext<AttendanceContextType | null>(null);
 
-// Storage keys
-const STORAGE_KEYS = {
-  CURRENT_ATTENDANCE: 'homecell_current_attendance',
-  ATTENDANCE_HISTORY: 'homecell_attendance_history',
-  PENDING_SYNC: 'homecell_pending_sync',
-  LAST_SYNC: 'homecell_last_sync'
-};
-
-// Helper functions
-const generateId = () => Math.random().toString(36).substr(2, 9);
-
-const getCurrentWeek = () => {
-  const now = new Date();
-  const startOfWeek = new Date(now.setDate(now.getDate() - now.getDay() + 1)); // Monday
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6); // Sunday
-
-  return {
-    week: `Week ${Math.ceil((startOfWeek.getTime() - new Date(startOfWeek.getFullYear(), 0, 1).getTime()) / (7 * 24 * 60 * 60 * 1000))}`,
-    weekEnding: endOfWeek.toISOString().split('T')[0]
+interface AttendanceResponse {
+  records: ApiAttendanceRecord[];
+  summary: {
+    total: number;
+    present: number;
+    absent: number;
+    excused: number;
+    firstTimers: number;
+    male: number;
+    female: number;
+    rate: number;
   };
-};
+}
+
+/** Local, unsaved edits keyed by member id. */
+interface Draft {
+  meetingDate: string;
+  marks: Record<string, { present: boolean; isFirstTimer: boolean }>;
+}
 
 export function AttendanceProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, isAuthenticated, isReady } = useAuth();
   const { hasPermission } = usePermissions();
 
-  const [currentAttendance, setCurrentAttendance] = useState<WeeklyAttendance | null>(null);
-  const [attendanceHistory, setAttendanceHistory] = useState<WeeklyAttendance[]>([]);
-  const [pendingSync, setPendingSync] = useState<WeeklyAttendance[]>([]);
+  const [history, setHistory] = useState<WeeklyAttendance[]>([]);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [lastSyncAt, setLastSyncAt] = useState<string>('');
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [lastSyncAt, setLastSyncAt] = useState('');
 
-  // Load data from localStorage on mount
-  useEffect(() => {
-    const loadStoredData = () => {
-      try {
-        const storedCurrent = localStorage.getItem(STORAGE_KEYS.CURRENT_ATTENDANCE);
-        const storedHistory = localStorage.getItem(STORAGE_KEYS.ATTENDANCE_HISTORY);
-        const storedPending = localStorage.getItem(STORAGE_KEYS.PENDING_SYNC);
-        const storedLastSync = localStorage.getItem(STORAGE_KEYS.LAST_SYNC);
+  const canView = useCallback(() => hasPermission('view_attendance'), [hasPermission]);
+  const canMark = useCallback(() => hasPermission('mark_attendance'), [hasPermission]);
 
-        if (storedCurrent) {
-          setCurrentAttendance(JSON.parse(storedCurrent));
-        }
-        if (storedHistory) {
-          setAttendanceHistory(JSON.parse(storedHistory));
-        }
-        if (storedPending) {
-          setPendingSync(JSON.parse(storedPending));
-        }
-        if (storedLastSync) {
-          setLastSyncAt(storedLastSync);
-        }
-      } catch (error) {
-        console.error('Error loading attendance data:', error);
+  const load = useCallback(async () => {
+    if (!isAuthenticated || !user?.homecellId || !canView()) {
+      setHistory([]);
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const data = await api.get<AttendanceResponse>('/api/attendance', { homecellId: user.homecellId });
+      setHistory(groupAttendanceByMeeting(data.records ?? [], user.homecellId));
+      setLastSyncAt(new Date().toISOString());
+    } catch (err) {
+      if (!(err instanceof ApiError && err.isUnauthorized)) {
+        console.error('attendance load failed:', err);
       }
-    };
+      setHistory([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isAuthenticated, user?.homecellId, canView]);
 
-    loadStoredData();
+  useEffect(() => {
+    if (!isReady) return;
+    void load();
+  }, [isReady, load]);
 
-    // Listen for online/offline events
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
     return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
     };
   }, []);
 
-  // Save to localStorage whenever state changes
-  useEffect(() => {
-    if (currentAttendance) {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_ATTENDANCE, JSON.stringify(currentAttendance));
-    }
-  }, [currentAttendance]);
+  /**
+   * Begin (or resume) a session for the given week.
+   *
+   * Existing marks are pre-loaded from history so a leader opening a past
+   * meeting sees what was recorded rather than a blank sheet.
+   */
+  const startAttendanceSession = useCallback(
+    async (week: string) => {
+      const meetingDate = /^\d{4}-\d{2}-\d{2}$/.test(week) ? week : weekEndingFrom(week);
+      const existing = history.find((w) => w.weekEnding === meetingDate || w.weekEnding === week);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ATTENDANCE_HISTORY, JSON.stringify(attendanceHistory));
-  }, [attendanceHistory]);
+      const marks: Draft['marks'] = {};
+      if (existing) {
+        for (const record of existing.records) {
+          marks[record.memberId] = { present: record.present, isFirstTimer: record.isFirstTimer };
+        }
+      }
+      setDraft({ meetingDate, marks });
+    },
+    [history],
+  );
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.PENDING_SYNC, JSON.stringify(pendingSync));
-  }, [pendingSync]);
+  const markAttendance = useCallback((memberId: string, present: boolean, isFirstTimer = false) => {
+    setDraft((prev) => {
+      const base: Draft = prev ?? { meetingDate: todayIso(), marks: {} };
+      const existing = base.marks[memberId];
+      return {
+        ...base,
+        marks: {
+          ...base.marks,
+          [memberId]: {
+            present,
+            // Marking someone absent clears any first-timer flag.
+            isFirstTimer: present ? (isFirstTimer || existing?.isFirstTimer || false) : false,
+          },
+        },
+      };
+    });
+  }, []);
 
-  const startAttendanceSession = async (week: string) => {
-    if (!user) return;
+  const saveAttendance = useCallback(async () => {
+    if (!draft || !user?.homecellId) return;
+    const entries = Object.entries(draft.marks);
+    if (entries.length === 0) return;
 
     setIsLoading(true);
     try {
-      const { weekEnding } = getCurrentWeek();
+      await api.post(
+        '/api/attendance',
+        {
+          meetingDate: draft.meetingDate,
+          records: entries.map(([memberId, mark]) => ({
+            memberId,
+            status: mark.isFirstTimer ? 'first_timer' : mark.present ? 'present' : 'absent',
+          })),
+        },
+        { homecellId: user.homecellId },
+      );
+      setDraft(null);
+      await load();
+    } catch (err) {
+      // Deliberately keep the draft: losing a leader's attendance sheet to a
+      // transient network error would be far worse than showing an error.
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [draft, user?.homecellId, load]);
 
-      // Check if session already exists
-      const existingSession = attendanceHistory.find(a => a.week === week && a.status === 'draft');
-      if (existingSession) {
-        setCurrentAttendance(existingSession);
-        return;
-      }
+  const syncAttendance = useCallback(async () => {
+    await load();
+  }, [load]);
 
-      // Create new session
-      const newSession: WeeklyAttendance = {
-        id: generateId(),
-        homecellId: user.homecellId || '',
-        week,
-        weekEnding,
-        totalMembers: mockMembers.length,
-        presentCount: 0,
-        absentCount: mockMembers.length,
-        firstTimers: 0,
+  const getAttendanceHistory = useCallback(
+    (weeks?: number) => (weeks ? history.slice(0, weeks) : history),
+    [history],
+  );
+
+  const getAttendanceStats = useCallback((): AttendanceStats => computeAttendanceStats(history), [history]);
+
+  /**
+   * A draft that has not been persisted. Reported as a single synthetic week so
+   * the UI can honestly say "1 unsaved session" rather than implying nothing
+   * is pending.
+   */
+  const getPendingSync = useCallback((): WeeklyAttendance[] => {
+    if (!draft || !user?.homecellId || Object.keys(draft.marks).length === 0) return [];
+    const records = Object.entries(draft.marks).map(([memberId, mark]) => ({
+      id: `draft:${memberId}`,
+      memberId,
+      memberName: '',
+      date: draft.meetingDate,
+      week: weekEndingFrom(draft.meetingDate),
+      present: mark.present,
+      isFirstTimer: mark.isFirstTimer,
+      markedBy: user.id,
+      markedAt: new Date().toISOString(),
+      synced: false,
+    }));
+
+    return [
+      {
+        id: `draft:${draft.meetingDate}`,
+        homecellId: user.homecellId,
+        week: draft.meetingDate,
+        weekEnding: weekEndingFrom(draft.meetingDate),
+        totalMembers: records.length,
+        presentCount: records.filter((r) => r.present).length,
+        absentCount: records.filter((r) => !r.present).length,
+        firstTimers: records.filter((r) => r.isFirstTimer).length,
         adults: 0,
         children: 0,
         maleCount: 0,
         femaleCount: 0,
-        records: mockMembers.map(member => ({
-          id: generateId(),
-          memberId: member.id,
-          memberName: member.fullName,
-          date: new Date().toISOString().split('T')[0],
-          week,
-          present: false,
-          isFirstTimer: false,
-          markedBy: user.id,
-          markedAt: new Date().toISOString(),
-          synced: false
-        })),
+        records,
         status: 'draft',
         createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-
-      setCurrentAttendance(newSession);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const markAttendance = (memberId: string, present: boolean, isFirstTimer?: boolean) => {
-    if (!currentAttendance) return;
-
-    setCurrentAttendance(prev => {
-      if (!prev) return null;
-
-      const updatedRecords = prev.records.map(record => {
-        if (record.memberId === memberId) {
-          return {
-            ...record,
-            present,
-            isFirstTimer: isFirstTimer !== undefined ? isFirstTimer : record.isFirstTimer,
-            markedAt: new Date().toISOString()
-          };
-        }
-        return record;
-      });
-
-      // Calculate stats
-      const presentCount = updatedRecords.filter(r => r.present).length;
-      const firstTimers = updatedRecords.filter(r => r.present && r.isFirstTimer).length;
-      const member = mockMembers.find(m => m.id === memberId);
-      const adults = updatedRecords.filter(r => r.present && mockMembers.find(m => m.id === r.memberId)?.tag === 'adult').length;
-      const children = updatedRecords.filter(r => r.present && mockMembers.find(m => m.id === r.memberId)?.tag === 'child').length;
-      const males = updatedRecords.filter(r => r.present && mockMembers.find(m => m.id === r.memberId)?.gender === 'male').length;
-      const females = updatedRecords.filter(r => r.present && mockMembers.find(m => m.id === r.memberId)?.gender === 'female').length;
-
-      return {
-        ...prev,
-        records: updatedRecords,
-        presentCount,
-        absentCount: prev.totalMembers - presentCount,
-        firstTimers,
-        adults,
-        children,
-        maleCount: males,
-        femaleCount: females,
-        updatedAt: new Date().toISOString()
-      };
-    });
-  };
-
-  const saveAttendance = async () => {
-    if (!currentAttendance) return;
-
-    setIsLoading(true);
-    try {
-      const savedAttendance: WeeklyAttendance = {
-        ...currentAttendance,
-        status: (isOnline ? 'synced' : 'submitted') as 'draft' | 'submitted' | 'synced',
-        syncedAt: isOnline ? new Date().toISOString() : undefined,
-        updatedAt: new Date().toISOString()
-      };
-
-      // Update records sync status
-      const syncedRecords = savedAttendance.records.map(record => ({
-        ...record,
-        synced: isOnline
-      }));
-
-      savedAttendance.records = syncedRecords;
-
-      // Move to history
-      setAttendanceHistory(prev => {
-        const existingIndex = prev.findIndex(a => a.id === savedAttendance.id);
-        if (existingIndex >= 0) {
-          const updated = [...prev];
-          updated[existingIndex] = savedAttendance;
-          return updated;
-        }
-        return [savedAttendance, ...prev];
-      });
-
-      // Add to pending sync if offline
-      if (!isOnline) {
-        setPendingSync(prev => [...prev, savedAttendance]);
-      }
-
-      setCurrentAttendance(null);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const syncAttendance = async () => {
-    if (!isOnline || pendingSync.length === 0) return;
-
-    setIsLoading(true);
-    try {
-      // Simulate API sync
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      // Mark as synced
-      const syncedItems = pendingSync.map(item => ({
-        ...item,
-        status: 'synced' as const,
-        syncedAt: new Date().toISOString(),
-        records: item.records.map(record => ({ ...record, synced: true }))
-      }));
-
-      // Update history
-      setAttendanceHistory(prev =>
-        prev.map(item => {
-          const synced = syncedItems.find(s => s.id === item.id);
-          return synced || item;
-        })
-      );
-
-      setPendingSync([]);
-      setLastSyncAt(new Date().toISOString());
-      localStorage.setItem(STORAGE_KEYS.LAST_SYNC, new Date().toISOString());
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const getAttendanceHistory = (weeks = 4): WeeklyAttendance[] => {
-    return attendanceHistory.slice(0, weeks);
-  };
-
-  const getAttendanceStats = (): AttendanceStats => {
-    const history = getAttendanceHistory(8);
-    const currentWeek = history[0];
-
-    // Calculate monthly average (approximate)
-    const monthlyAverage = history.length > 0
-      ? history.reduce((sum, week) => sum + (week.presentCount / week.totalMembers) * 100, 0) / history.length
-      : 0;
-
-    // Weekly trend
-    const weeklyTrend = history.map((week, index) => {
-      const prevWeek = history[index + 1];
-      const growth = prevWeek
-        ? ((week.presentCount - prevWeek.presentCount) / prevWeek.presentCount) * 100
-        : 0;
-
-      return {
-        week: week.week,
-        present: week.presentCount,
-        total: week.totalMembers,
-        percentage: (week.presentCount / week.totalMembers) * 100,
-        growth
-      };
-    });
-
-    // Category breakdown from current week
-    const categoryBreakdown = currentWeek ? {
-      adults: currentWeek.adults,
-      children: currentWeek.children,
-      firstTimers: currentWeek.firstTimers,
-      males: currentWeek.maleCount,
-      females: currentWeek.femaleCount
-    } : {
-      adults: 0,
-      children: 0,
-      firstTimers: 0,
-      males: 0,
-      females: 0
-    };
-
-    return {
-      currentWeek: currentWeek ? {
-        present: currentWeek.presentCount,
-        total: currentWeek.totalMembers,
-        percentage: (currentWeek.presentCount / currentWeek.totalMembers) * 100,
-        growth: weeklyTrend[0]?.growth || 0
-      } : {
-        present: 0,
-        total: 0,
-        percentage: 0,
-        growth: 0
+        updatedAt: new Date().toISOString(),
       },
-      monthlyAverage,
-      weeklyTrend,
-      categoryBreakdown
-    };
-  };
+    ];
+  }, [draft, user?.homecellId, user?.id]);
 
-  const getPendingSync = (): WeeklyAttendance[] => {
-    return pendingSync;
-  };
+  const currentAttendance = useMemo(() => {
+    if (draft) {
+      const pending = getPendingSync();
+      return pending[0] ?? null;
+    }
+    return history[0] ?? null;
+  }, [draft, getPendingSync, history]);
 
-  const canMarkAttendance = (): boolean => {
-    return hasPermission('mark_attendance');
-  };
-
-  const canViewAttendance = (): boolean => {
-    return hasPermission('view_homecell_reports') || hasPermission('view_homecell_members');
-  };
-
-  const canViewAggregatedData = (): boolean => {
-    return ['zonal', 'area', 'district', 'admin', 'super_admin'].includes(user?.role || '');
-  };
-
-  return (
-    <AttendanceContext.Provider value={{
+  const value = useMemo(
+    () => ({
       currentAttendance,
       isLoading,
       isOnline,
@@ -359,10 +233,23 @@ export function AttendanceProvider({ children }: { children: ReactNode }) {
       getAttendanceHistory,
       getAttendanceStats,
       getPendingSync,
-      canMarkAttendance,
-      canViewAttendance,
-      canViewAggregatedData
-    }}>
+      canMarkAttendance: canMark,
+      canViewAttendance: canView,
+      // Aggregated multi-cell reporting needs zone scope or above.
+      canViewAggregatedData: () => hasPermission('view_zone_data'),
+      /** True when there are unsaved marks the leader should be warned about. */
+      hasUnsavedChanges: Boolean(draft && Object.keys(draft.marks).length > 0),
+    }),
+    [
+      currentAttendance, isLoading, isOnline, lastSyncAt,
+      startAttendanceSession, markAttendance, saveAttendance, syncAttendance,
+      getAttendanceHistory, getAttendanceStats, getPendingSync,
+      canMark, canView, hasPermission, draft,
+    ],
+  );
+
+  return (
+    <AttendanceContext.Provider value={value as AttendanceContextType}>
       {children}
     </AttendanceContext.Provider>
   );

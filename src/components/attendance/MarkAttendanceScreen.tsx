@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { MobileLayout, PageHeader } from '@/components/layout/MobileLayout';
 import { BottomNavigation } from '@/components/layout/BottomNavigation';
 import { Button } from '@/components/ui/button';
-import { mockMembers, mockHomecell, Member } from '@/data/mockData';
+import { useMembers } from '@/contexts/MemberContext';
 import { useApp } from '@/contexts/AppContext';
 import { useAttendance } from '@/contexts/AttendanceContext';
 import { usePermissions } from '@/contexts/PermissionsContext';
@@ -41,6 +41,8 @@ export function MarkAttendanceScreen() {
     syncAttendance,
     canMarkAttendance
   } = useAttendance();
+  // The roster is whoever is actually in this cell, not a fixed list.
+  const { members } = useMembers();
 
   const [showSuccess, setShowSuccess] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -131,7 +133,7 @@ export function MarkAttendanceScreen() {
   }
 
   const presentCount = currentAttendance?.presentCount || 0;
-  const totalMembers = currentAttendance?.totalMembers || mockMembers.length;
+  const totalMembers = currentAttendance?.totalMembers || members.length;
   const pendingSync = currentAttendance?.status === 'submitted';
 
   if (showSuccess) {
@@ -237,7 +239,7 @@ export function MarkAttendanceScreen() {
       {/* Members List */}
       <div className="p-4 pb-28">
         <div className="space-y-2">
-          {mockMembers.map((member, index) => {
+          {members.map((member, index) => {
             const record = currentAttendance?.records.find(r => r.memberId === member.id);
             const isPresent = record?.present ?? false;
             const isFirstTimer = record?.isFirstTimer ?? false;

@@ -1,38 +1,35 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { Material } from '../types';
-import { mockMaterials } from '../data/mockData';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
+import { api } from '../lib/api';
+import { toUiMaterial, type ApiMaterial } from '../lib/adapters';
 import { useAuth } from './AuthContext';
+import { usePermissions } from './PermissionsContext';
+import type { Material } from '../types';
 
 interface MaterialsContextType {
-  // State
   materials: Material[];
   isLoading: boolean;
   isOnline: boolean;
   lastSyncAt: string;
+  loadError: string | null;
 
-  // CRUD Operations
   uploadMaterial: (material: Omit<Material, 'id' | 'createdAt' | 'updatedAt'>) => Promise<Material>;
   updateMaterial: (id: string, updates: Partial<Material>) => Promise<Material>;
   deleteMaterial: (id: string) => Promise<void>;
   publishMaterial: (id: string) => Promise<void>;
   scheduleMaterial: (id: string, scheduledAt: string) => Promise<void>;
 
-  // Access Control
   getAccessibleMaterials: () => Material[];
   getCurrentWeekMaterials: () => Material[];
   getMaterialsByAudience: (audience: Material['targetAudience']) => Material[];
 
-  // Offline Support
   downloadMaterial: (id: string) => Promise<void>;
   getDownloadedMaterials: () => Material[];
   acknowledgeMaterial: (id: string) => Promise<void>;
   isMaterialAcknowledged: (id: string) => boolean;
 
-  // Sync
   syncMaterials: () => Promise<void>;
-  getPendingChanges: () => any[];
+  getPendingChanges: () => unknown[];
 
-  // Permissions
   canUploadMaterials: () => boolean;
   canManageMaterials: () => boolean;
   canViewMaterials: () => boolean;
@@ -40,280 +37,190 @@ interface MaterialsContextType {
   canAcknowledgeMaterials: () => boolean;
 }
 
+/**
+ * Study materials, backed by the real API.
+ *
+ * The materials module stores links and metadata. Ministry content must not be
+ * re-hosted without authorisation, so official resources are referenced by URL
+ * rather than copied onto this platform.
+ *
+ * Acknowledgements are persisted server-side, which means a provider's
+ * acknowledgement of this week's outline is visible to the leader — the main
+ * reason this needs a database rather than localStorage.
+ */
 const MaterialsContext = createContext<MaterialsContextType | null>(null);
 
+interface MaterialsResponse {
+  materials: ApiMaterial[];
+}
+
 export function MaterialsProvider({ children }: { children: ReactNode }) {
-  const { user, hasPermission } = useAuth();
-  const [materials, setMaterials] = useState<Material[]>(mockMaterials);
+  const { isAuthenticated, isReady } = useAuth();
+  const { hasPermission } = usePermissions();
+
+  const [materials, setMaterials] = useState<Material[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [lastSyncAt, setLastSyncAt] = useState(new Date().toISOString());
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [lastSyncAt, setLastSyncAt] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Monitor online status
+  const canViewMaterials = useCallback(() => hasPermission('view_materials'), [hasPermission]);
+
+  const load = useCallback(async () => {
+    if (!isAuthenticated || !canViewMaterials()) {
+      setMaterials([]);
+      return;
+    }
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const data = await api.get<MaterialsResponse>('/api/materials');
+      setMaterials((data.materials ?? []).map((m) => toUiMaterial(m, m.acknowledged ? ['me'] : [])));
+      setLastSyncAt(new Date().toISOString());
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not load materials.');
+      setMaterials([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isAuthenticated, canViewMaterials]);
+
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    if (!isReady) return;
+    void load();
+  }, [isReady, load]);
 
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
     return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
     };
   }, []);
 
-  // Load downloaded materials from localStorage
-  useEffect(() => {
-    const downloadedMaterials = localStorage.getItem('downloadedMaterials');
-    if (downloadedMaterials) {
-      const downloaded = JSON.parse(downloadedMaterials);
-      setMaterials(prev => prev.map(material =>
-        downloaded.includes(material.id)
-          ? { ...material, downloaded: true, downloadedAt: material.downloadedAt || new Date().toISOString() }
-          : material
-      ));
-    }
+  const uploadMaterial = useCallback(
+    async (input: Omit<Material, 'id' | 'createdAt' | 'updatedAt'>): Promise<Material> => {
+      if (!input.url) {
+        throw new Error('A link is required. File uploads are not enabled on this deployment yet.');
+      }
+      const created = await api.post<{ id: string }>('/api/materials', {
+        title: input.title,
+        description: input.description || undefined,
+        category: input.type,
+        // Map the UI's format onto the API's material_type vocabulary.
+        materialType:
+          input.format === 'audio' ? 'audio' : input.format === 'text' ? 'document' : 'document',
+        url: input.url,
+      });
+      await load();
+      return (
+        materials.find((m) => m.id === created.id) ?? { ...input, id: created.id }
+      );
+    },
+    [load, materials],
+  );
 
-    const acknowledgedMaterials = localStorage.getItem('acknowledgedMaterials');
-    if (acknowledgedMaterials) {
-      const acknowledged = JSON.parse(acknowledgedMaterials);
-      setMaterials(prev => prev.map(material =>
-        acknowledged[material.id]
-          ? { ...material, acknowledgedBy: acknowledged[material.id] }
-          : material
-      ));
+  const updateMaterial = useCallback(async (id: string, updates: Partial<Material>): Promise<Material> => {
+    const existing = materials.find((m) => m.id === id);
+    if (!existing) throw new Error('That material could not be found.');
+    if (updates.url && updates.url !== existing.url) {
+      throw new Error('Materials cannot be edited after publishing. Publish a corrected version instead.');
     }
+    // Metadata-only changes are not supported by the API yet.
+    throw new Error('Editing published materials is not supported yet. Publish a corrected version instead.');
+  }, [materials]);
+
+  const deleteMaterial = useCallback(async (id: string): Promise<void> => {
+    void id;
+    // There is no delete endpoint: removing study material would silently
+    // change what members see, so it is a deliberate omission for now.
+    throw new Error('Deleting materials is not supported yet.');
   }, []);
 
-  const uploadMaterial = async (materialData: Omit<Material, 'id' | 'createdAt' | 'updatedAt'>): Promise<Material> => {
-    if (!canUploadMaterials()) {
-      throw new Error('Insufficient permissions to upload materials');
+  const publishMaterial = useCallback(async (id: string): Promise<void> => {
+    // Materials publish immediately on creation.
+    setMaterials((prev) => prev.map((m) => (m.id === id ? { ...m, isPublished: true } : m)));
+  }, []);
+
+  const scheduleMaterial = useCallback(async (id: string, scheduledAt: string): Promise<void> => {
+    void id;
+    void scheduledAt;
+    throw new Error('Scheduling materials is not available yet. Publish it now instead.');
+  }, []);
+
+  const getAccessibleMaterials = useCallback(() => materials, [materials]);
+
+  const getCurrentWeekMaterials = useCallback(() => {
+    const now = Date.now();
+    return materials.filter((m) => now - new Date(m.publishedAt).getTime() < 7 * 86400000);
+  }, [materials]);
+
+  const getMaterialsByAudience = useCallback(
+    (audience: Material['targetAudience']) => materials.filter((m) => m.targetAudience === audience),
+    [materials],
+  );
+
+  /**
+   * Record a download.
+   *
+   * The file is fetched by the browser from its own URL; what is persisted is
+   * the acknowledgement that this person has taken the material, which is what
+   * the leader actually needs to see.
+   */
+  const downloadMaterial = useCallback(async (id: string): Promise<void> => {
+    const material = materials.find((m) => m.id === id);
+    if (!material) throw new Error('That material could not be found.');
+
+    if (material.url) {
+      window.open(material.url, '_blank', 'noopener,noreferrer');
     }
 
-    setIsLoading(true);
-    try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      const newMaterial: Material = {
-        ...materialData,
-        id: `mat${Date.now()}`,
-        updatedAt: new Date().toISOString(),
-      };
-
-      setMaterials(prev => [...prev, newMaterial]);
-      return newMaterial;
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const updateMaterial = async (id: string, updates: Partial<Material>): Promise<Material> => {
-    if (!canManageMaterials()) {
-      throw new Error('Insufficient permissions to update materials');
-    }
-
-    setIsLoading(true);
-    try {
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      const updatedMaterials = materials.map(material =>
-        material.id === id
-          ? { ...material, ...updates, updatedAt: new Date().toISOString() }
-          : material
-      );
-
-      setMaterials(updatedMaterials);
-      return updatedMaterials.find(m => m.id === id)!;
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const deleteMaterial = async (id: string): Promise<void> => {
-    if (!canManageMaterials()) {
-      throw new Error('Insufficient permissions to delete materials');
-    }
-
-    setIsLoading(true);
-    try {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      setMaterials(prev => prev.filter(material => material.id !== id));
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const publishMaterial = async (id: string): Promise<void> => {
-    await updateMaterial(id, { isPublished: true, publishedAt: new Date().toISOString() });
-  };
-
-  const scheduleMaterial = async (id: string, scheduledAt: string): Promise<void> => {
-    await updateMaterial(id, { scheduledAt });
-  };
-
-  const getAccessibleMaterials = (): Material[] => {
-    if (!user) return [];
-
-    const userRole = user.role;
-    const now = new Date();
-
-    return materials.filter(material => {
-      // Check if material is published or scheduled
-      if (!material.isPublished && (!material.scheduledAt || new Date(material.scheduledAt) > now)) {
-        return false;
-      }
-
-      // Role-based access
-      switch (userRole) {
-        case 'admin':
-        case 'super_admin':
-          return true; // Can see all materials
-        case 'leader':
-        case 'assistant':
-        case 'zonal':
-        case 'area':
-        case 'district':
-          return material.targetAudience === 'all' ||
-                 material.targetAudience === 'leaders' ||
-                 material.targetAudience === 'assistants';
-        case 'provider':
-          return material.targetAudience === 'all' || material.targetAudience === 'providers';
-        case 'member':
-          return material.targetAudience === 'all';
-        default:
-          return false;
-      }
-    });
-  };
-
-  const getCurrentWeekMaterials = (): Material[] => {
-    const accessibleMaterials = getAccessibleMaterials();
-    const now = new Date();
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay()); // Start of current week (Sunday)
-    startOfWeek.setHours(0, 0, 0, 0);
-
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6); // End of week (Saturday)
-    endOfWeek.setHours(23, 59, 59, 999);
-
-    return accessibleMaterials.filter(material => {
-      const publishedDate = new Date(material.publishedAt);
-      return publishedDate >= startOfWeek && publishedDate <= endOfWeek && material.type === 'weekly';
-    });
-  };
-
-  const getMaterialsByAudience = (audience: Material['targetAudience']): Material[] => {
-    return materials.filter(material => material.targetAudience === audience);
-  };
-
-  const downloadMaterial = async (id: string): Promise<void> => {
-    if (!canDownloadMaterials()) {
-      throw new Error('Insufficient permissions to download materials');
-    }
-
-    const material = materials.find(m => m.id === id);
-    if (!material) {
-      throw new Error('Material not found');
-    }
-
-    // Simulate download
-    setIsLoading(true);
-    try {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      const updatedMaterials = materials.map(m =>
-        m.id === id
-          ? { ...m, downloaded: true, downloadedAt: new Date().toISOString(), localPath: `/downloads/${m.id}.${m.format}` }
-          : m
-      );
-
-      setMaterials(updatedMaterials);
-
-      // Save to localStorage
-      const downloaded = updatedMaterials.filter(m => m.downloaded).map(m => m.id);
-      localStorage.setItem('downloadedMaterials', JSON.stringify(downloaded));
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const getDownloadedMaterials = (): Material[] => {
-    return materials.filter(material => material.downloaded);
-  };
-
-  const acknowledgeMaterial = async (id: string): Promise<void> => {
-    if (!canAcknowledgeMaterials()) {
-      throw new Error('Insufficient permissions to acknowledge materials');
-    }
-
-    if (!user) return;
-
-    const material = materials.find(m => m.id === id);
-    if (!material || !material.requiresAcknowledgment) {
-      return;
-    }
-
-    const updatedMaterials = materials.map(m =>
-      m.id === id
-        ? {
-            ...m,
-            acknowledgedBy: [...(m.acknowledgedBy || []), user.id]
-          }
-        : m
+    setMaterials((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, downloaded: true, downloadedAt: new Date().toISOString() } : m)),
     );
-
-    setMaterials(updatedMaterials);
-
-    // Save to localStorage
-    const acknowledged: Record<string, string[]> = {};
-    updatedMaterials.forEach(m => {
-      if (m.acknowledgedBy?.length) {
-        acknowledged[m.id] = m.acknowledgedBy;
-      }
-    });
-    localStorage.setItem('acknowledgedMaterials', JSON.stringify(acknowledged));
-  };
-
-  const isMaterialAcknowledged = (id: string): boolean => {
-    if (!user) return false;
-    const material = materials.find(m => m.id === id);
-    return material?.acknowledgedBy?.includes(user.id) || false;
-  };
-
-  const syncMaterials = async (): Promise<void> => {
-    if (!isOnline) return;
-
-    setIsLoading(true);
     try {
-      // Simulate sync
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      setLastSyncAt(new Date().toISOString());
-    } finally {
-      setIsLoading(false);
+      await api.post(`/api/materials/${id}/ack`, { type: 'downloaded' });
+    } catch {
+      // A failed acknowledgement must not block the member from reading.
     }
-  };
+  }, [materials]);
 
-  const getPendingChanges = (): any[] => {
-    // Placeholder for pending changes
-    return [];
-  };
+  const getDownloadedMaterials = useCallback(
+    () => materials.filter((m) => m.downloaded),
+    [materials],
+  );
 
-  // Permission checks
-  const canUploadMaterials = (): boolean => hasPermission('upload_materials');
-  const canManageMaterials = (): boolean => hasPermission('manage_materials');
-  const canViewMaterials = (): boolean => hasPermission('view_materials') || hasPermission('view_current_week_materials');
-  const canDownloadMaterials = (): boolean => hasPermission('download_materials') || hasPermission('download_current_week_materials');
-  const canAcknowledgeMaterials = (): boolean => hasPermission('acknowledge_materials');
+  const acknowledgeMaterial = useCallback(async (id: string): Promise<void> => {
+    await api.post(`/api/materials/${id}/ack`, { type: 'acknowledged' });
+    setMaterials((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, acknowledgedBy: [...(m.acknowledgedBy ?? []), 'me'] } : m)),
+    );
+  }, []);
 
-  return (
-    <MaterialsContext.Provider value={{
+  const isMaterialAcknowledged = useCallback(
+    (id: string) => {
+      const material = materials.find((m) => m.id === id);
+      return Boolean(material?.acknowledgedBy?.includes('me'));
+    },
+    [materials],
+  );
+
+  const syncMaterials = useCallback(async () => {
+    await load();
+  }, [load]);
+
+  const getPendingChanges = useCallback((): unknown[] => [], []);
+
+  const value = useMemo(
+    () => ({
       materials,
       isLoading,
       isOnline,
       lastSyncAt,
+      loadError,
       uploadMaterial,
       updateMaterial,
       deleteMaterial,
@@ -328,15 +235,22 @@ export function MaterialsProvider({ children }: { children: ReactNode }) {
       isMaterialAcknowledged,
       syncMaterials,
       getPendingChanges,
-      canUploadMaterials,
-      canManageMaterials,
+      canUploadMaterials: () => hasPermission('upload_materials'),
+      canManageMaterials: () => hasPermission('manage_materials'),
       canViewMaterials,
-      canDownloadMaterials,
-      canAcknowledgeMaterials
-    }}>
-      {children}
-    </MaterialsContext.Provider>
+      canDownloadMaterials: () => hasPermission('download_materials'),
+      canAcknowledgeMaterials: () => hasPermission('view_materials'),
+    }),
+    [
+      materials, isLoading, isOnline, lastSyncAt, loadError,
+      uploadMaterial, updateMaterial, deleteMaterial, publishMaterial, scheduleMaterial,
+      getAccessibleMaterials, getCurrentWeekMaterials, getMaterialsByAudience,
+      downloadMaterial, getDownloadedMaterials, acknowledgeMaterial, isMaterialAcknowledged,
+      syncMaterials, getPendingChanges, hasPermission, canViewMaterials,
+    ],
   );
+
+  return <MaterialsContext.Provider value={value}>{children}</MaterialsContext.Provider>;
 }
 
 export function useMaterials() {

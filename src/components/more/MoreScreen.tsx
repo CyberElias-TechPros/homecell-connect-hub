@@ -12,34 +12,80 @@ import {
   Shield,
   Settings,
   MessageSquare,
-  Info
+  Info,
+  HeartHandshake,
+  Sparkles,
+  PhoneCall,
+  UserPlus,
+  FileText,
+  ClipboardCheck
 } from 'lucide-react';
+import { usePermissions } from '@/contexts/PermissionsContext';
+import { useFollowUps } from '@/contexts/FollowUpsContext';
+import { useTestimonies } from '@/contexts/TestimoniesContext';
 
 export function MoreScreen() {
   const navigate = useNavigate();
+  const { hasPermission } = usePermissions();
+  const { getOverdueFollowUps, getFollowUpStats } = useFollowUps();
+  const { summary: testimonySummary } = useTestimonies();
 
+  const followUpStats = getFollowUpStats();
+  const overdue = getOverdueFollowUps().length;
+
+  // Every entry below resolves to a real route. Nothing here leads to a page
+  // that does not exist.
   const menuSections = [
     {
-      title: 'Account',
+      title: 'Cell life',
       items: [
-        { icon: User, label: 'Profile', path: '/profile', description: 'View and edit your profile' },
-        { icon: Bell, label: 'Notifications', path: '/notifications', description: 'Manage notification preferences' },
-        { icon: Shield, label: 'Privacy', path: '/privacy', description: 'Privacy and security settings' },
-      ]
+        { icon: HeartHandshake, label: 'Prayer', path: '/prayer', description: 'Share and pray for requests' },
+        { icon: Sparkles, label: 'Testimonies', path: '/testimonies', description: 'What God has done', badge: hasPermission('manage_prayer_requests') && testimonySummary.pending > 0 ? testimonySummary.pending : undefined },
+        { icon: MessageSquare, label: 'Announcements', path: '/announcements', description: 'Updates from your leaders' },
+      ],
+    },
+    {
+      title: 'Serve',
+      items: [
+        ...(hasPermission('view_followups')
+          ? [{
+              icon: PhoneCall,
+              label: 'Follow-ups',
+              path: '/followups',
+              description: overdue > 0
+                ? `${overdue} overdue — ${followUpStats.total} total`
+                : `${followUpStats.total} to work through`,
+              badge: overdue > 0 ? overdue : undefined,
+            }]
+          : []),
+        ...(hasPermission('mark_attendance')
+          ? [{ icon: ClipboardCheck, label: 'Attendance', path: '/attendance', description: 'Mark who attended' }]
+          : []),
+        ...(hasPermission('view_homecell_reports')
+          ? [{ icon: FileText, label: 'Reports', path: '/reports', description: 'Weekly cell reports' }]
+          : []),
+        ...(hasPermission('manage_invitations')
+          ? [{ icon: UserPlus, label: 'Invite people', path: '/invite', description: 'Create a link to join' }]
+          : []),
+        ...(hasPermission('manage_homecell_settings')
+          ? [{ icon: Settings, label: 'Cell settings', path: '/cell-settings', description: 'Meeting link, schedule & joining' }]
+          : []),
+      ],
     },
     {
       title: 'Resources',
       items: [
         { icon: BookOpen, label: 'Materials', path: '/materials', description: 'Study guides and resources' },
-        { icon: MessageSquare, label: 'Announcements', path: '/announcements', description: 'Church-wide updates' },
-      ]
+      ],
     },
     {
-      title: 'Support',
+      title: 'Account',
       items: [
-        { icon: HelpCircle, label: 'Help Center', path: '/help', description: 'FAQs and support' },
-        { icon: Info, label: 'About', path: '/about', description: 'App version and info' },
-      ]
+        { icon: User, label: 'Profile', path: '/profile', description: 'View and edit your profile' },
+        { icon: Bell, label: 'Notifications', path: '/notifications', description: 'Your notifications' },
+        { icon: Shield, label: 'Privacy', path: '/privacy', description: 'Your data and how it is handled' },
+        { icon: Info, label: 'About', path: '/profile', description: 'Account and app information' },
+      ],
     },
   ];
 
@@ -88,6 +134,13 @@ export function MoreScreen() {
                   <p className="font-medium text-foreground">{item.label}</p>
                   <p className="text-xs text-muted-foreground">{item.description}</p>
                 </div>
+                {/* Counts come from real data — overdue follow-ups, pending
+                    testimonies — so a badge always means something. */}
+                {'badge' in item && item.badge ? (
+                  <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-destructive px-1.5 text-[10px] font-bold text-destructive-foreground">
+                    {Number(item.badge) > 9 ? '9+' : item.badge}
+                  </span>
+                ) : null}
                 <ChevronRight className="w-4 h-4 text-muted-foreground" />
               </motion.div>
             ))}

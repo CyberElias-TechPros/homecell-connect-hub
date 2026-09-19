@@ -7,18 +7,16 @@ import {
   FileText,
   Menu,
   Home,
-  MessageSquare,
-  BookOpen,
-  Bell
+  HeartHandshake,
+  Sparkles,
 } from 'lucide-react';
 import { useAnnouncements } from '@/contexts/AnnouncementsContext';
 
 const navItems = [
   { path: '/dashboard', label: 'Home', icon: Home },
-  { path: '/announcements', label: 'Announcements', icon: Bell },
+  { path: '/prayer', label: 'Prayer', icon: HeartHandshake },
   { path: '/attendance', label: 'Attendance', icon: ClipboardCheck },
   { path: '/members', label: 'Members', icon: Users },
-  { path: '/reports', label: 'Reports', icon: FileText },
   { path: '/more', label: 'More', icon: Menu },
 ];
 

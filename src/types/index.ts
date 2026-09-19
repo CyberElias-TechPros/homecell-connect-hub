@@ -330,6 +330,8 @@ export interface WeeklyAttendance {
   homecellId: string;
   week: string;
   weekEnding: string;
+  /** The exact meeting date this row covers ('YYYY-MM-DD'). */
+  meetingDate?: string;
   totalMembers: number;
   presentCount: number;
   absentCount: number;
@@ -578,6 +580,8 @@ export interface AnnouncementContextType {
   getAnnouncements: (filters?: AnnouncementFilters) => Announcement[];
   markAsRead: (announcementId: string) => Promise<void>;
   getUnreadCount: () => number;
+  /** Whether the signed-in user has read a given announcement. */
+  isAnnouncementRead: (announcementId: string) => boolean;
   getReadReceipts: (announcementId: string) => AnnouncementReadReceipt[];
 
   // Statistics and Reports
@@ -621,7 +625,8 @@ export interface FollowUp {
   assignedToName: string;
   assignedBy: string; // User ID who assigned
   assignedByName: string;
-  status: 'pending' | 'contacted' | 'visited' | 'integrated';
+  // 'cancelled' is a void record and is excluded from the active pipeline.
+  status: 'pending' | 'contacted' | 'visited' | 'integrated' | 'cancelled';
   priority: 'low' | 'normal' | 'high' | 'urgent';
   notes: string;
   followUpHistory: FollowUpHistoryEntry[];
@@ -760,4 +765,35 @@ export interface ResponsiveGridProps {
   };
   gap: string;
   children: React.ReactNode;
+}
+// ---------------------------------------------------------------------------
+// Weekly cell report
+//
+// Previously defined inside src/data/mockData.ts. Moved here because it is a
+// real domain type now that reports are backed by the API, not mock data.
+// ---------------------------------------------------------------------------
+export interface WeeklyReport {
+  id: string;
+  homecellId: string;
+  weekEnding: string;
+  totalAttendance: number;
+  maleCount: number;
+  femaleCount: number;
+  adultCount: number;
+  childrenCount: number;
+  firstTimers: number;
+  newConverts: number;
+  soulsWon: number;
+  testimonies: string;
+  challenges: string;
+  prayerPoints: string;
+  offering?: number;
+  loveSeeds?: number;
+  status: 'draft' | 'submitted' | 'approved';
+  submittedAt?: string;
+  updatedAt?: string;
+  syncedAt?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  createdAt?: string;
 }
