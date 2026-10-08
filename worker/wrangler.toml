@@ -20,7 +20,7 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "homecell-db"
 # Cloudflare account: Pain (ba3a0c06ca86c6e61d2c6b0350abb80b)
-database_id = "4e4bdc6e-b41a-43d8-b9da-8d498a52f23b"
+database_id = "c1d1ff10-d03d-44d1-8d3b-b6c258732265"
 migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------
@@ -28,8 +28,8 @@ migrations_dir = "migrations"
 # ---------------------------------------------------------------------------
 [[kv_namespaces]]
 binding = "CACHE"
-id = "dc845a7a301440f59890b208456c0a33"
-preview_id = "dc845a7a301440f59890b208456c0a33"
+id = "374d62249c9f40f29dc781c7a279853b"
+preview_id = "374d62249c9f40f29dc781c7a279853b"
 
 # ---------------------------------------------------------------------------
 # R2 — uploaded materials, avatars, report exports
